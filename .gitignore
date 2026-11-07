@@ -3,3 +3,7 @@ node_modules/
 *.log
 dist/
 packs/
+
+# Docker: local env and secrets
+.env
+secrets/

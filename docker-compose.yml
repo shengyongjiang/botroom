@@ -1,0 +1,43 @@
+# LAN dashboard on host port 4546 (4545 is the original local demo).
+# Defaults to demo data: no host mounts, no credentials. See docs/run.md.
+services:
+  botroom:
+    build: .
+    image: botroom:lan
+    container_name: botroom-lan
+    ports:
+      - "4546:4546"
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      WMAD_HOST: 0.0.0.0
+      WMAD_PORT: 4546
+    # Optional LAN admin token: create ./secrets/wmad_admin_token (gitignored)
+    # and uncomment. Without it, update/shutdown/scene install stay
+    # loopback-only and the container's own loopback is the only admin.
+    # secrets:
+    #   - wmad_admin_token
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /home/node/.whatsmyagentdoing
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # No privileged, no docker socket, no $HOME/log/PID mounts. The only
+    # real-data opt-in is a read-only sessions mount, commented out:
+    # volumes:
+    #   - "${HOME}/.claude:/home/node/.claude:ro"
+    #   - "${HOME}/.codex:/home/node/.codex:ro"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4546/api/ping').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+# secrets:
+#   wmad_admin_token:
+#     file: ./secrets/wmad_admin_token
