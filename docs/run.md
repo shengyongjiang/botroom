@@ -107,6 +107,35 @@ LAN; **do not publish 4546 to the internet.**
 - The page uses relative URLs only, so it works behind any path or hostname
   the proxy serves.
 
+## Room size and phones
+
+The room is real geometry, not a scaled-down desktop image: the floor plan is
+rebuilt from the number of desks it has to hold.
+
+- **Phones** (viewport width ≤ 640 px) get a 4-desk room (one pod). Agents past
+  the fourth go off duty and show in the existing `+N` counter; they are still
+  listed in the agent panel.
+- **`?desks=N`** (2–40) sizes the room on any screen, e.g.
+  `http://<lan-address>:4546/?desks=8`. It is read once at page load.
+- Portrait phones fit the room **by width** and letterbox vertically, so the
+  desks stay legible instead of shrinking to the height.
+- The agent panel becomes a bottom sheet (`min(45dvh, 320px)`); the office keeps
+  a visible area above it, and the page never scrolls sideways.
+
+### Still hardcoded (honest list)
+
+| Value | Where | Notes |
+|---|---|---|
+| 4 desks on phones | `PHONE_MAX_DESKS`, `public/office.js` | not configurable; `?desks=` can only lower it |
+| 640 px phone breakpoint | `viewCaps()`, `public/office.js` | matches the CSS `@media (max-width: 640px)` |
+| 760 px bottom-sheet breakpoint | `public/index.html` CSS | sheet height `min(45dvh, 320px)` |
+| Room width/depth floors | `buildPlan()` | `D ≥ 14.5`, right column 7.2 wide, meeting room 5.2 deep |
+| Pod pitch | `buildPlan()` | 4.2 × 4.7 tiles per pod; one pod = one column |
+| 3D camera | `fitCamera3D()` | distance 40, lift 0.58 (1.15 portrait), zoom `[0.6, 2]` |
+| 7 wanderers | `MAX_WANDERERS` | off-duty agents walking around |
+
+Scene packs have a fixed floor plan and ignore `?desks=`.
+
 ## Notes
 
 - Non-root (`node`, uid 1000), `cap_drop: ALL`, `no-new-privileges`,

@@ -939,13 +939,18 @@ export class Office3D extends window.Office {
   fitCamera3D(reset) {
     const { W, D } = this.plan;
     const center = new THREE.Vector3(W / 2, 0.6, D / 2);
+    const caps = this.viewCaps();
     if (reset || !this.fitted) {
       const dist = 40;
-      this.camera.position.set(center.x + dist * 0.62, center.y + dist * 0.58, center.z + dist * 0.62);
+      // Portrait phones look down more steeply so the room reads tall, not wide.
+      const lift = caps.portrait ? 1.15 : 0.58;
+      this.camera.position.set(center.x + dist * 0.62, center.y + dist * lift, center.z + dist * 0.62);
       this.controls.target.copy(center);
-      this.camera.zoom = this.compact ? 1 : 1.25;
+      this.camera.zoom = this.compact ? 1 : caps.portrait ? 1.4 : 1.25;
       this.fitted = true;
     }
+    // Keep the zoom within what the viewport can show legibly.
+    this.camera.zoom = Math.min(2, Math.max(0.6, this.camera.zoom));
     this.camera.lookAt(this.controls.target);
     this.camera.updateMatrixWorld(true);
     // Fit the room's corners into the view.
@@ -962,7 +967,9 @@ export class Office3D extends window.Office {
     let w = (maxX - minX) * 1.06, h = (maxY - minY) * 1.1;
     // Leave room for screen-space badges and bubbles in a small PiP window.
     if (this.compact) h *= this.ch / Math.max(80, this.ch - 48);
-    if (w / h > aspect) h = w / aspect; else w = h * aspect;
+    // Portrait phones fit the room by width only and letterbox vertically,
+    // instead of shrinking everything to the short side.
+    if (w / h > aspect || caps.widthOnly) h = w / aspect; else w = h * aspect;
     const cxv = (minX + maxX) / 2, cyv = (minY + maxY) / 2;
     const full = w * (this.cw / vw);
     Object.assign(this.camera, { left: cxv - w / 2, right: cxv - w / 2 + full, top: cyv + h / 2, bottom: cyv - h / 2 });
@@ -1204,7 +1211,9 @@ export class Office3D extends window.Office {
     }
     if (this.arcadeScreen) this.arcadeScreen.material.emissive.setHSL((t * 0.05) % 1, 0.7, 0.5);
     const fbPlaying = this.plan.pois.filter((q) => q.pair === 'fb' && q.taken).length === 2;
-    if (this.rods) this.rods.forEach((r, k) => { r.position.z = this.plan.props.find((q) => q.t === 'foosball').y + 0.4 + (fbPlaying ? Math.sin(t * 8 + k) * 0.06 : 0); r.rotation.z = fbPlaying ? Math.sin(t * 12 + k) * 0.6 : 0; });
+    // A smaller room (phone 4-desk plan, ?desks=N) may have no foosball table.
+    const fb = this.plan.props.find((q) => q.t === 'foosball');
+    if (this.rods && fb) this.rods.forEach((r, k) => { r.position.z = fb.y + 0.4 + (fbPlaying ? Math.sin(t * 8 + k) * 0.06 : 0); r.rotation.z = fbPlaying ? Math.sin(t * 12 + k) * 0.6 : 0; });
     this.updateBall();
 
     this.syncActors(dt);

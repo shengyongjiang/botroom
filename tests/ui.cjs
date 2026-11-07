@@ -1,5 +1,6 @@
 // Browser integration checks with fixed sample sessions (no private logs).
-// Requires Google Chrome; WMAD_HEADED=1 opens visible test windows.
+// Uses Playwright's bundled Chromium (WMAD_UI_CHANNEL=chrome for system Chrome);
+// WMAD_HEADED=1 opens visible test windows.
 const assert = require('node:assert/strict');
 const { chromium } = require('playwright');
 const fs = require('node:fs');
@@ -71,7 +72,9 @@ async function drawnLogos(target) {
   const keys = Object.keys(translations.window.I18N.en).sort();
   for (const lang of Object.values(translations.window.I18N)) assert.deepEqual(Object.keys(lang).sort(), keys);
   check('all nine languages provide every UI string');
-  browser=await chromium.launch({headless:process.env.WMAD_HEADED !== '1',channel:'chrome',ignoreDefaultArgs:['--disable-background-timer-throttling','--disable-backgrounding-occluded-windows','--disable-renderer-backgrounding'],args:['--window-size=1280,960']});
+  // Bundled Chromium by default; WMAD_UI_CHANNEL=chrome uses a system Chrome.
+  const channel = process.env.WMAD_UI_CHANNEL || null;
+  browser=await chromium.launch({headless:process.env.WMAD_HEADED !== '1',...(channel?{channel}:{}),ignoreDefaultArgs:['--disable-background-timer-throttling','--disable-backgrounding-occluded-windows','--disable-renderer-backgrounding'],args:['--window-size=1280,960']});
   const context=await browser.newContext({viewport:{width:1280,height:960},locale:'en-US'});
   await context.addInitScript(sessions=>{
    window.EventSource=class {constructor(){window.__events=this;setTimeout(()=>{if(!this.closed)this.onmessage?.({data:JSON.stringify({now:Date.now(),sessions})})},0)}close(){this.closed=true}};

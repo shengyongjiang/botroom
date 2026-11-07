@@ -48,7 +48,7 @@
   }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
-  html, body { margin: 0; background: var(--bg); color: var(--ink); }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); overflow-x: hidden; max-width: 100%; }
   body {
     font: 14px/1.45 ui-sans-serif, -apple-system, "Segoe UI", "PingFang TC", "Noto Sans TC", sans-serif;
     padding: 24px 16px 64px;
@@ -286,8 +286,26 @@
     body.full details.menu.active > summary::before { content: ""; position: absolute; top: 5px; right: 5px; width: 7px; height: 7px; border-radius: 50%; background: var(--tool); }
   }
   @media (max-width: 359px) { body.full #sceneName { display: none; } }
+  /* Phones: the agent panel is a bottom sheet over the lower part of the
+     office, never the whole scene; the office keeps a padding-bottom so the
+     room stays visible above it. Touch targets are at least 44x44 px. */
   @media (max-width: 760px) {
-    body.full .side { width: min(340px, 88vw); }
+    body.full .side { left: 0; right: 0; top: auto; bottom: 0; width: auto; height: min(45dvh, 320px); border-left: 0; border-top: 1px solid var(--line); border-radius: 14px 14px 0 0; box-shadow: 0 -8px 30px #0002; }
+    body.full.side-closed .side { transform: translateY(100%); box-shadow: none; }
+    body.full .side-tab { top: auto; bottom: calc(12px + env(safe-area-inset-bottom, 0px)); min-width: 44px; min-height: 44px; justify-content: center; }
+    body.full .side-tab .ui-ico { width: 18px; height: 18px; }
+    body.full .icon-btn { width: 44px; height: 44px; }
+    body.full .side-head { padding: 6px 8px 6px 12px; }
+    body.full .srow { min-height: 44px; }
+    body.full .legend { display: none; }
+    body.full .wrap { height: 100dvh; }
+  }
+  @media (max-width: 640px) {
+    html body.full .controls > .btn, html body.full .controls > .settings > summary { min-width: 44px; min-height: 44px; justify-content: center; }
+    html body.full .controls .ui-ico { width: 18px; height: 18px; }
+    .office { min-height: 300px; }
+  }
+  @media (max-width: 760px) {
     body.full h1, body.full .summary { display: none; }
     body.full header { flex-wrap: wrap; }
     /* Menus span the screen under the toolbar instead of hanging off their button. */
@@ -339,6 +357,7 @@
   .office-loader .spin { width: 26px; height: 26px; border: 3px solid var(--line); border-top-color: var(--tool); border-radius: 50%; animation: spin .8s linear infinite; }
   .office-gl, .office-overlay { position: absolute; inset: 0; }
   .office-overlay { touch-action: none; }
+  .office canvas, .office-gl { touch-action: none; }
   .tip { position: fixed; z-index: 10; width: 320px; max-width: calc(100vw - 24px); pointer-events: none; display: none; }
   .tip.pinned { pointer-events: auto; }
   .tip .card { box-shadow: 0 8px 30px rgba(0,0,0,.18); }
@@ -545,6 +564,10 @@ if (PIP) document.body.classList.add('pip');
     } catch { /* malformed preferences use the saved defaults */ }
   }
   for (const k of ['view', 'quality', 'scene', 'lang']) if (validPreference(k, q.get(k))) store.set(k, q.get(k));
+  // Room size: ?desks=N caps the desks (and so the floor plan). Read before the
+  // query string is dropped below, and kept for the office to use.
+  const desks = Number(q.get('desks'));
+  if (Number.isInteger(desks) && desks >= 2 && desks <= 40) window.WMAD_DESKS = desks;
   if (location.search) history.replaceState(null, '', location.pathname + (PIP ? '?pip=1' : ''));
 }
 
@@ -937,6 +960,11 @@ const officeOpts = {
 };
 let office = null;
 let officeKind = null;
+let officeShape = null;
+function officeCaps() {
+  const w = window.innerWidth || 0, h = window.innerHeight || 0;
+  return { phone: w > 0 && w <= 640, portrait: h > w };
+}
 // The 3D office (three.js + models) is only fetched when someone picks it.
 // Until the new office has drawn a settled frame, show a loader instead of a
 // half-built scene.
@@ -949,8 +977,12 @@ async function makeOffice() {
   const high = state.quality === 'high';
   const scene = high && state.scene !== 'office' && state.scenes.some((x) => x.id === state.scene) ? state.scene : 'office';
   const kind = high ? `high:${scene}` : 'mid';
-  if (kind === officeKind) return;
+  // The phone layout (desk cap, portrait fit) depends on the viewport, so a
+  // resize or orientation change that crosses it rebuilds the office.
+  const shape = `${officeCaps().phone ? 'phone' : 'wide'}:${officeCaps().portrait ? 'portrait' : 'landscape'}`;
+  if (kind === officeKind && shape === officeShape) return;
   officeKind = kind;
+  officeShape = shape;
   setLoading(true, high ? L.loading3d : L.loading2d);
   let Cls = window.Office;
   const opts = { ...officeOpts, showAgent: state.showAgent };
@@ -1332,7 +1364,16 @@ document.addEventListener('keydown', (e) => {
   if (e.target.closest?.('input, select, textarea, [contenteditable]') || e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === 'Escape' && state.full && sel) closeDetail();
 });
-addEventListener('resize', () => { if (!state.full) return; measureBar(); office?.setInset(panelInset(), false); });
+// Resize and orientation change: re-measure the bar, re-fit the office, and
+// keep the panel folded away on phones so it never covers the whole scene.
+addEventListener('resize', () => {
+  if (!state.full) return;
+  measureBar();
+  const caps = officeCaps();
+  if (`${caps.phone ? 'phone' : 'wide'}:${caps.portrait ? 'portrait' : 'landscape'}` !== officeShape) makeOffice();
+  else { office?.resize(); office?.setInset(panelInset(), false); }
+  if (matchMedia('(max-width: 760px)').matches) setSide(false, false);
+});
 if (state.full) {
   document.body.classList.add('full');
   requestAnimationFrame(measureBar);

@@ -9,6 +9,15 @@
   const WALL_H = 2.4;
   const WORKING = new Set(['thinking', 'tool', 'typing', 'waiting', 'error']);
   const MAX_WANDERERS = 7;
+  // Phones: past four working agents the desks get too small to read, so the
+  // extra ones go off duty into the existing "+N" counter.
+  const PHONE_MAX_DESKS = 4;
+  // Optional hard cap on desks (room size). The page reads ?desks=N at load
+  // (before it drops the query string) and leaves it on window.WMAD_DESKS.
+  function roomDeskCap() {
+    const n = Number(window.WMAD_DESKS);
+    return Number.isInteger(n) && n >= 2 && n <= 40 ? n : Infinity;
+  }
   const SPEED = 2.1; // tiles / second
 
   const SKIN = ['#f3cfb0', '#e5b38f', '#c98d66', '#9a6646', '#6e4630', '#f7dcc7'];
@@ -252,10 +261,40 @@
 
     // ------------------------------------------------------------ floor plan
 
+    // What the current viewport allows: the desk cap and the zoom ceiling.
+    // Portrait phones fit the room by width only (letterboxed vertically)
+    // instead of shrinking the whole floor plan to the height.
+    viewCaps() {
+      const w = window.innerWidth || 0, h = window.innerHeight || 0;
+      const phone = w > 0 && w <= 640;
+      const portrait = h > w;
+      return {
+        phone,
+        portrait,
+        maxDesks: phone ? PHONE_MAX_DESKS : Infinity,
+        maxZoom: phone ? 3 : 2,
+        widthOnly: phone && portrait,
+      };
+    }
+
     buildPlan(nWorking) {
       const pal = this.pal;
-      const pods = Math.max(2, Math.ceil((nWorking + 2) / 4));
-      const podCols = pods <= 4 ? 2 : 3;
+      // Phones get a fixed 2x2 pod (4 desks) so the desks stay legible.
+      const cap = this.viewCaps().maxDesks;
+      // Room size: ?desks=N caps the desks on any screen, and a phone caps them
+      // at 4. Desks come in 4-desk pods, so a cap of 4 is one pod (a 2x2 room),
+      // not the two pods the old floor of 2 forced.
+      const roomCap = Math.min(cap, roomDeskCap());
+      // The first plan is built before any session arrives (nWorking = 0), so a
+      // configured room size has to size it: otherwise it starts at one pod and
+      // a reader can see the small room before update() grows it.
+      const seats = Number.isFinite(roomCap) ? Math.min(Math.max(nWorking, 0) || roomCap, roomCap) : nWorking;
+      const pods = Number.isFinite(roomCap)
+        ? Math.max(1, Math.ceil(seats / 4))
+        : Math.max(2, Math.ceil((seats + 2) / 4));
+      // A single pod is one column wide: reserving a second column would make
+      // the phone room as wide as a desktop one and force everything to shrink.
+      const podCols = pods === 1 ? 1 : pods <= 4 ? 2 : 3;
       const podRows = Math.ceil(pods / podCols);
       const OW = 1.3 + (podCols - 1) * 4.2 + 3.9; // open office width
       const OD = podRows * 4.7 + 0.8;             // open office depth (pods)
@@ -487,15 +526,23 @@
         .filter((s) => !WORKING.has(s.status))
         .sort((a, b) => (b.lastEventAt || 0) - (a.lastEventAt || 0));
       const wanderers = off.slice(0, MAX_WANDERERS);
-      this.offDuty = off.length - wanderers.length;
-
       const cap = this.plan.desks.length;
-      // Scene packs have a fixed floor plan; the built-in office grows with the team.
-      if (!this.plan.fixed && (working.length > cap - 1 || (cap > 8 && working.length < cap * 0.35))) {
+      // Scene packs have a fixed floor plan; the built-in office grows with the
+      // team, and shrinks back when the viewport (a phone) caps the desks.
+      const maxDesks = this.viewCaps().maxDesks;
+      // ?desks=N (room size) sizes the room itself: it shrinks a bigger plan and
+      // also grows a small one, so the count is what the operator asked for.
+      const roomCap = Math.min(maxDesks, roomDeskCap());
+      const shortOfCap = Number.isFinite(roomCap) && cap < roomCap;
+      if (!this.plan.fixed && (working.length > cap - 1 || cap > roomCap || shortOfCap || (cap > 8 && working.length < cap * 0.35))) {
         this.plan = this.buildPlan(working.length);
         this.deskOf.clear();
         for (const p of this.people.values()) { p.poi = null; p.napDesk = null; p.desk = null; p.until = 0; }
       }
+      // Working agents past the viewport's desk cap go off duty (they still
+      // appear in the panel and in the "+N" counter), never squeezed in.
+      const seated = Math.min(working.length, maxDesks, roomDeskCap(), this.plan.desks.length);
+      this.offDuty = off.length - wanderers.length + (working.length - seated);
 
       const workKeys = new Set(working.map((s) => s.key));
       for (const k of [...this.deskOf.keys()]) if (!workKeys.has(k)) this.deskOf.delete(k);
@@ -510,6 +557,9 @@
         this.deskOf.set(s.key, i);
         used.add(i);
       }
+      // Over the viewport's desk cap: the rest are off duty, not at a desk.
+      const seatedKeys = new Set([...working].sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0)).slice(0, seated).map((s) => s.key));
+      for (const k of [...this.deskOf.keys()]) if (!seatedKeys.has(k)) this.deskOf.delete(k);
       const takenDesks = new Set([...this.deskOf.values()].map((i) => desks[i]));
 
       const shown = new Set();
@@ -643,7 +693,10 @@
       const top = this.iso(0, 0, WALL_H).y - 20, bottom = this.iso(W, D, 0).y + 10;
       const inset = this.inset();
       const vw = Math.max(120, this.cw - inset);
-      const zoom = Math.min(vw / (right - left + 30), this.ch / (bottom - top + 30), 2);
+      const caps = this.viewCaps();
+      const byWidth = vw / (right - left + 30);
+      const byHeight = this.ch / (bottom - top + 30);
+      const zoom = Math.min(caps.widthOnly ? byWidth : Math.min(byWidth, byHeight), caps.maxZoom);
       const want = { zoom, ox: vw / 2 - ((left + right) / 2) * zoom, oy: this.ch / 2 - ((top + bottom) / 2) * zoom };
       // While the inset eases, follow it exactly; otherwise settle gently.
       if (!this.cam || this.insetMoving()) this.cam = want;
