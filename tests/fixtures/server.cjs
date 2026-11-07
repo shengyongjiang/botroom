@@ -19,14 +19,18 @@ fs.writeFileSync(path.join(USER_DIR, 'outside.json'), '{"outside":true}');
 const watcher = new EventEmitter();
 watcher.sessions = () => [];
 // LAN scenario: trust our proxy header and accept any Host, like WMAD_ALLOWED_HOSTS=*.
-const lanMode = process.argv[2] === 'lan';
+// "lan-notrust" is the same without --trust-proxy; "lan-spoof" listens on all
+// interfaces so the socket peer is a real LAN address (see tests/lan.cjs).
+const scenario = process.argv[2];
+const lanMode = scenario === 'lan' || scenario === 'lan-notrust' || scenario === 'lan-spoof';
 // The allow list comes from the environment (WMAD_ALLOWED_HOSTS=* in tests/lan.cjs).
-const server = createServer(watcher, lanMode ? { trustProxy: true } : {});
+const trustProxy = scenario !== 'lan-notrust';
+const server = createServer(watcher, lanMode ? { trustProxy } : {});
 
 function request(url, host = 'localhost', extra = {}) {
   return new Promise((resolve, reject) => {
     const req = http.request({
-      host: '127.0.0.1', port: server.address().port, path: url, method: extra.method || 'GET',
+      host: extra.connect || '127.0.0.1', port: server.address().port, path: url, method: extra.method || 'GET',
       headers: { host: `${host}:${server.address().port}`, ...(extra.headers || {}) },
     }, res => {
       const chunks = [];
@@ -61,9 +65,18 @@ const TOKEN = process.env.WMAD_TEST_TOKEN || '';
 const ADMIN = { '/api/shutdown': 'stop', '/api/update': 'update', '/api/scenes/install?id=fixture': 'install' };
 const LAN = { 'x-forwarded-for': '192.168.1.50' };
 const LOCAL = { 'x-forwarded-for': '127.0.0.1' };
+// The address a LAN client connects to (first non-internal IPv4), or null.
+function lanAddress() {
+  for (const list of Object.values(require('node:os').networkInterfaces())) {
+    for (const x of list || []) if (x && x.family === 'IPv4' && !x.internal) return x.address;
+  }
+  return null;
+}
+
 async function lan() {
   const info = await ping('mybox.lan');
-  assert.deepEqual(Object.keys(info).sort(), ['admin', 'app', 'demo']);
+  // Not every scenario runs with a token, so the key set is checked in tests/lan.cjs.
+  assert.equal(info.app, 'whatsmyagentdoing');
   assert.equal(info.admin, TOKEN ? 'token' : 'loopback');
   // Reads stay open to the LAN.
   for (const url of ['/api/sessions', '/api/scenes', '/']) {
@@ -85,6 +98,8 @@ async function lan() {
   const same = await request('/api/sessions', 'mybox.lan', { headers: { ...LAN, origin: 'http://mybox.lan:4546' } });
   assert.equal(same.status, 200);
   // Admin routes: LAN without a token is refused, even with the custom header.
+  // The gate answers 403 {"error":"admin disabled on LAN"} before any handler
+  // runs (a token, when configured, is simply not sent here).
   for (const [url, h] of Object.entries(ADMIN)) {
     const res = await request(url, 'mybox.lan', { method: 'POST', headers: { ...LAN, 'x-whatsmyagentdoing': h } });
     assert.equal(res.status, 403, url);
@@ -106,14 +121,58 @@ async function lan() {
     // A token without the custom header still hits the second layer.
     const noHeader = await request('/api/scenes/install?id=fixture', 'mybox.lan', { method: 'POST', headers: { ...LAN, authorization: `Bearer ${TOKEN}` } });
     assert.equal(noHeader.status, 403);
-    // A trusted proxy forwarding a loopback client counts as loopback.
+    // A trusted proxy forwarding a loopback client counts as loopback (the
+    // socket peer must itself be loopback; see spoof() below).
     const viaProxy = await request('/api/scenes/install?id=fixture', 'mybox.lan', { method: 'POST', headers: { ...LOCAL, 'x-whatsmyagentdoing': 'install' } });
     pass(viaProxy);
   }
 }
 
+// Spoofing: headers must never turn a non-loopback peer into loopback.
+// Every admin route, with and without the custom header, must stay 403.
+const SPOOF = [
+  { 'x-forwarded-for': '127.0.0.1' },
+  { 'x-forwarded-for': '::1' },
+  { 'x-forwarded-for': 'localhost' },
+  { 'x-forwarded-for': '127.0.0.1, 192.168.1.50' },
+  { forwarded: 'for=127.0.0.1' },
+  { forwarded: 'for="[::1]";proto=http' },
+  { 'x-real-ip': '127.0.0.1' },
+  { 'x-forwarded-host': 'localhost' },
+  { origin: 'http://127.0.0.1:4546' },
+  { origin: 'http://localhost:4546' },
+];
+async function spoof(connect) {
+  const base = { connect };
+  const tryAdmin = async (url, h, headers) => {
+    const res = await request(url, 'mybox.lan', { ...base, method: 'POST', headers: { ...headers, 'x-whatsmyagentdoing': h } });
+    assert.equal(res.status, 403, `${url} ${JSON.stringify(headers)}`);
+    return res;
+  };
+  for (const headers of SPOOF) {
+    for (const [url, h] of Object.entries(ADMIN)) {
+      await tryAdmin(url, h, headers);
+      // ...and never more permissive without the custom header either.
+      const bare = await request(url, 'mybox.lan', { ...base, method: 'POST', headers });
+      assert.equal(bare.status, 403, `${url} ${JSON.stringify(headers)}`);
+    }
+    // GET on an admin route never mutates: the gate refuses it, or (loopback
+    // only) the route's own method check does; it is never a 200.
+    const get = await request('/api/scenes/install?id=fixture', 'mybox.lan', { ...base, headers });
+    assert.ok(get.status === 403 || get.status === 404, `GET /api/scenes/install ${get.status} ${JSON.stringify(headers)}`);
+  }
+  // A spoofed Host of a loopback name is not "the LAN address" either: with
+  // the default allow list it is refused, with '*' it is allowed but still
+  // cannot reach admin (checked above).
+  const reads = await request('/api/sessions', 'mybox.lan', { ...base, headers: { 'x-forwarded-for': '127.0.0.1' } });
+  assert.equal(reads.status, 200);
+  // The ping still reports loopback-only admin (no token in this scenario).
+  const info = await ping('mybox.lan');
+  assert.equal(info.admin, 'loopback');
+}
+
 async function main() {
-  server.listen(0, '127.0.0.1');
+  server.listen(0, scenario === 'lan-spoof' || scenario === 'lan-notrust' ? '0.0.0.0' : '127.0.0.1');
   await once(server, 'listening');
   try {
     const scenario = process.argv[2];
@@ -133,6 +192,13 @@ async function main() {
       }
     } else if (scenario === 'lan') {
       await lan();
+    } else if (scenario === 'lan-notrust' || scenario === 'lan-spoof') {
+      const addr = lanAddress();
+      assert.ok(addr, 'lan-spoof needs a non-loopback IPv4 address');
+      // The socket peer is this machine's LAN address: not loopback.
+      await spoof(addr);
+      // A loopback peer is loopback whatever headers it sends (that is the
+      // CLI and the healthcheck); only the LAN peer above must stay refused.
     } else {
       assert.equal(scenario, 'guards');
       for (const url of ['/assets/%', '/scenes/%']) {

@@ -31,6 +31,19 @@ test('admin gate without a token: LAN writes 403, reads 200, foreign Origin 403,
   runFixture('lan', { WMAD_ALLOWED_HOSTS: '*' }, t);
 });
 
+test('admin gate without --trust-proxy: X-Forwarded-For is ignored, LAN writes 403', (t) => {
+  runFixture('lan-notrust', { WMAD_ALLOWED_HOSTS: '*' }, t);
+});
+
+// The socket peer is this machine's LAN address, so every spoofed header
+// (X-Forwarded-For, Forwarded, X-Real-IP, Origin, Host) must stay refused on
+// all admin routes, with --trust-proxy on and off.
+for (const trust of [true, false]) {
+  test(`spoofed XFF/Forwarded/Origin from a LAN peer: admin 403 (trust-proxy ${trust ? 'on' : 'off'})`, (t) => {
+    runFixture('lan-spoof', { WMAD_ALLOWED_HOSTS: '*', ...(trust ? {} : { WMAD_TRUST_PROXY: '0' }) }, t);
+  });
+}
+
 test('admin gate with a token file: wrong token 403, right token 200', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wmad-token-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -97,6 +110,12 @@ test('host matching: port stripped, case ignored, [::1] kept, *.lan wildcards', 
   assert.ok(!config.matchesHost('evil.example', ['localhost', '127.0.0.1', '[::1]']));
   assert.ok(config.matchesHost('anything', ['*']));
   assert.ok(!config.matchesHost('', ['*']));
+});
+
+test('isLoopbackAddr is an address check: names never count', () => {
+  const { isLoopbackAddr } = require('../src/server');
+  for (const a of ['127.0.0.1', '127.1.2.3', '::1', '[::1]', '0:0:0:0:0:0:0:1']) assert.ok(isLoopbackAddr(a), a);
+  for (const a of ['localhost', '', null, '192.168.1.50', '10.0.0.1', '::', '0.0.0.0', '127.0.0.1.evil.example', 'fe80::1']) assert.ok(!isLoopbackAddr(a), String(a));
 });
 
 test('loopback helpers', () => {

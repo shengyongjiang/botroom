@@ -122,19 +122,23 @@ function snapshot(watcher, opts) {
   return { now, lang: opts.demo ? null : promptLanguage(raw), sessions, summary: summary(sessions, now) };
 }
 
-// Client address for the admin gate: the socket, or the first X-Forwarded-For
-// hop when running behind our own proxy (--trust-proxy). Computed once.
+// Client address for the admin gate, computed once per request. Only the
+// socket peer counts, except behind our own proxy (--trust-proxy): then the
+// first X-Forwarded-For hop is used, and only when that peer is itself
+// loopback. Host, Origin and Forwarded never make a request loopback.
 function clientAddress(req, trustProxy) {
-  if (trustProxy) {
+  const peer = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+  if (trustProxy && isLoopbackAddr(peer)) {
     const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
     if (fwd) return fwd.replace(/^\[|\]$/g, '');
   }
-  return String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+  return peer;
 }
 
+// Strictly an address: "localhost" is a name, not something a socket says.
 function isLoopbackAddr(addr) {
   const a = String(addr || '').toLowerCase().replace(/^\[|\]$/g, '');
-  return a === '::1' || a === 'localhost' || /^127\./.test(a);
+  return a === '::1' || a === '0:0:0:0:0:0:0:1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(a);
 }
 
 function tokenOk(given, expected) {
@@ -301,4 +305,4 @@ function createServer(watcher, opts, { onShutdown, onRestart } = {}) {
   return server;
 }
 
-module.exports = { createServer, snapshot };
+module.exports = { createServer, snapshot, isLoopbackAddr, clientAddress };
