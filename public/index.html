@@ -1010,7 +1010,7 @@ function renderSceneSel() {
     `<span class="lbl">${label}</span>${sub ? `<small>${sub}</small>` : ''}${CHECK}`, title);
   sceneSel.innerHTML = card('office', 'office', esc(L.office)) +
     state.scenes.map((x) => card(x.id, x.id, esc(name(x)), '', x.credits || '')).join('') +
-    state.available.map((x) => card(x.id, `dl:${x.id}`, esc(name(x)), `${DOWNLOAD}${kb(x.size)}`, `${L.dl} ${kb(x.size)}`)).join('');
+    (adminOk() ? state.available : []).map((x) => card(x.id, `dl:${x.id}`, esc(name(x)), `${DOWNLOAD}${kb(x.size)}`, `${L.dl} ${kb(x.size)}`)).join('');
   const cur = current === 'office' ? L.office : name(state.scenes.find((x) => x.id === current) || { id: current });
   document.getElementById('sceneIco').innerHTML = sceneIcon(current);
   document.getElementById('sceneName').textContent = cur;
@@ -1026,6 +1026,7 @@ sceneSel.addEventListener('click', async (e) => {
   const b = e.target.closest('button');
   if (!b || b.classList.contains('on') || sceneSel.dataset.busy) return;
   let id = b.dataset.v;
+  if (id.startsWith('dl:') && !adminOk()) return;
   hideTip();
   if (id.startsWith('dl:')) {
     // A scene pack: download it (the server checks its checksum), then switch.
@@ -1046,10 +1047,23 @@ sceneSel.addEventListener('click', async (e) => {
 const scenesReady = loadScenes();
 
 // ---- version + one-click update
+// Admin actions (update, scene download) are loopback-only unless the server
+// has a token: /api/ping says which, and dead buttons are hidden, not shown.
+let adminMode = 'loopback';
+const adminOk = () => adminMode !== 'off';
+fetch('/api/ping', { cache: 'no-store' }).then((r) => r.json()).then((p) => {
+  adminMode = p.admin === 'token' || p.admin === 'off' ? p.admin : 'loopback';
+  if (!adminOk()) {
+    document.body.classList.add('read-only');
+    renderVersion();
+    loadScenes().then(renderSceneSel);
+  }
+}).catch(() => {});
 const verEl = document.getElementById('ver');
 let verInfo = null;
 function renderVersion() {
   if (!verInfo) return;
+  if (!adminOk()) { verEl.innerHTML = `<span>v${esc(verInfo.version)}</span>`; document.getElementById('newVer').hidden = true; return; }
   let html = `<span>v${esc(verInfo.version)}</span>`;
   if (verInfo.updateAvailable) {
     html = verInfo.canUpdate

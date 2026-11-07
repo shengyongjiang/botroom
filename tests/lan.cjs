@@ -107,6 +107,19 @@ test('loopback helpers', () => {
   assert.ok(config.isLoopbackHost('127.0.0.1'));
 });
 
+test('the page uses relative URLs only (no localhost, 127.0.0.1 or http://)', () => {
+  const files = ['index.html', 'office.js', 'popout.js'];
+  // SVG namespaces and data: URIs are not requests to a host.
+  const allowed = /xmlns(?:\s*=\s*["']|:)[^"'\s>]*http:\/\/www\.w3\.org/g;
+  for (const f of files) {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8').replace(allowed, '');
+    for (const bad of [/localhost/i, /127\.0\.0\.1/, /http:\/\//i]) {
+      const hit = src.split('\n').findIndex((line) => bad.test(line));
+      assert.equal(hit, -1, `${f}:${hit + 1} has an absolute URL: ${bad}`);
+    }
+  }
+});
+
 test('server binds 0.0.0.0 and answers on the LAN address with the configured Host', async (t) => {
   const { DemoWatcher } = require('../src/demo');
   const { createServer } = require('../src/server');
