@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const { guessFromPrompts } = require('./lang');
@@ -20,6 +21,7 @@ const scenes = require('./scenes');
 const updater = require('./update');
 const { ompResumeCommand } = require('./omp');
 const { dayKey } = require('./parsers');
+const config = require('./config');
 
 function serveFile(res, root, rel) {
   const file = path.normalize(path.join(root, rel));
@@ -120,9 +122,61 @@ function snapshot(watcher, opts) {
   return { now, lang: opts.demo ? null : promptLanguage(raw), sessions, summary: summary(sessions, now) };
 }
 
+// Client address for the admin gate: the socket, or the first X-Forwarded-For
+// hop when running behind our own proxy (--trust-proxy). Computed once.
+function clientAddress(req, trustProxy) {
+  if (trustProxy) {
+    const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    if (fwd) return fwd.replace(/^\[|\]$/g, '');
+  }
+  return String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+}
+
+function isLoopbackAddr(addr) {
+  const a = String(addr || '').toLowerCase().replace(/^\[|\]$/g, '');
+  return a === '::1' || a === 'localhost' || /^127\./.test(a);
+}
+
+function tokenOk(given, expected) {
+  if (!given || !expected) return false;
+  const a = Buffer.from(String(given));
+  const b = Buffer.from(String(expected));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+// The admin token from Authorization: Bearer <t> or X-WMAD-Token: <t>.
+function presentedToken(req) {
+  const auth = String(req.headers.authorization || '');
+  const m = /^Bearer\s+(.+)$/i.exec(auth);
+  if (m) return m[1].trim();
+  const h = req.headers['x-wmad-token'];
+  return h ? String(h).trim() : null;
+}
+
 function createServer(watcher, opts, { onShutdown, onRestart } = {}) {
   const clients = new Set();
   let last = '';
+  // Resolved once: host/port are irrelevant here, the allow list and token are.
+  const cfg = config.resolve({}, process.env);
+  const allowedHosts = config.parseHosts(opts.allowedHosts || cfg.allowedHosts);
+  const token = opts.token !== undefined ? opts.token : cfg.token;
+  const trustProxy = opts.trustProxy !== undefined ? !!opts.trustProxy : cfg.trustProxy;
+  const local = config.localAddresses();
+  // admin mode: "loopback" (default), "token" (LAN admin unlocked) or "off"
+  const adminMode = () => (token ? 'token' : 'loopback');
+  const hostAllowed = (hostHeader) => config.matchesHost(hostHeader, allowedHosts) || local.has(config.hostNameOf(hostHeader));
+  // A foreign Origin means another site's page is driving the browser; the
+  // same-origin LAN page passes because its Origin host is in the allow list.
+  const originAllowed = (origin) => {
+    if (!origin || origin === 'null') return !origin;
+    try { return hostAllowed(new URL(origin).host); } catch { return false; }
+  };
+  // Writes: loopback, or a valid token. Custom headers stay a second layer.
+  const adminAllowed = (req) => isLoopbackAddr(req.wmadAddr) || (!!token && tokenOk(presentedToken(req), token));
+  const deny = (res, error) => {
+    res.writeHead(403, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error }));
+  };
 
   const push = (force) => {
     let body;
@@ -139,13 +193,18 @@ function createServer(watcher, opts, { onShutdown, onRestart } = {}) {
   setInterval(() => { for (const res of clients) res.write(': ping\n\n'); }, 20000).unref();
 
   const server = http.createServer((req, res) => {
-    // Refuse anything not addressed to loopback (blocks DNS-rebinding pages
-    // from reading your prompts through this server).
-    const host = String(req.headers.host || '').replace(/:\d+$/, '');
-    if (!['localhost', '127.0.0.1', '[::1]'].includes(host)) {
+    // Refuse any Host that isn't configured or one of this machine's own
+    // addresses (blocks DNS-rebinding pages from reading your prompts).
+    if (!hostAllowed(req.headers.host)) {
       res.writeHead(403).end();
       return;
     }
+    if (!originAllowed(req.headers.origin)) {
+      res.writeHead(403).end();
+      return;
+    }
+    // Never emit CORS headers: no other site can read a response.
+    req.wmadAddr = clientAddress(req, trustProxy);
     const url = new URL(req.url, 'http://localhost');
     if (STATIC[url.pathname]) {
       const [file, type] = STATIC[url.pathname];
@@ -176,7 +235,8 @@ function createServer(watcher, opts, { onShutdown, onRestart } = {}) {
         available: cat.filter((x) => !ids.has(x.id)).map(({ id, name, version, size, credits, icon }) => ({ id, name, version, size, credits, icon: icon || '🗺️' })),
       }));
     } else if (url.pathname === '/api/scenes/install' && req.method === 'POST') {
-      // Same guard as shutdown: a custom header web pages can't send cross-site.
+      // Admin gate, then the same custom-header guard as shutdown.
+      if (!adminAllowed(req)) return deny(res, 'admin disabled on LAN');
       if (req.headers['x-whatsmyagentdoing'] !== 'install') { res.writeHead(403).end(); return; }
       const id = url.searchParams.get('id') || '';
       scenes.install(id).then(
@@ -195,6 +255,7 @@ function createServer(watcher, opts, { onShutdown, onRestart } = {}) {
     } else if (url.pathname === '/api/shutdown' && req.method === 'POST') {
       // Only our CLI sends this header; a web page can't add a custom header
       // to a cross-site request without a CORS preflight, which we never allow.
+      if (!adminAllowed(req)) return deny(res, 'admin disabled on LAN');
       if (req.headers['x-whatsmyagentdoing'] !== 'stop' || !onShutdown) {
         res.writeHead(403).end();
         return;
@@ -209,7 +270,8 @@ function createServer(watcher, opts, { onShutdown, onRestart } = {}) {
         res.end(JSON.stringify(updater.info()));
       });
     } else if (url.pathname === '/api/update' && req.method === 'POST') {
-      // Same guard as shutdown: web pages can't send this header cross-site.
+      // Admin gate, then the same custom-header guard as shutdown.
+      if (!adminAllowed(req)) return deny(res, 'admin disabled on LAN');
       if (req.headers['x-whatsmyagentdoing'] !== 'update') { res.writeHead(403).end(); return; }
       updater.update().then(
         (version) => {
@@ -222,7 +284,7 @@ function createServer(watcher, opts, { onShutdown, onRestart } = {}) {
       );
     } else if (url.pathname === '/api/ping') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ app: 'whatsmyagentdoing' }));
+      res.end(JSON.stringify({ app: 'whatsmyagentdoing', admin: adminMode(), demo: !!(opts.demo || cfg.demo) }));
     } else if (url.pathname === '/events') {
       res.writeHead(200, {
         'content-type': 'text/event-stream',

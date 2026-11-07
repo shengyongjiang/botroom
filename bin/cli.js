@@ -2,6 +2,7 @@
 'use strict';
 
 const http = require('http');
+const os = require('os');
 const { spawn } = require('child_process');
 const { Watcher, CLAUDE_DIR, CODEX_DIR, GEMINI_DIR, CLIENT_DIRS, ompDirs, ANTIGRAVITY_DIR } = require('../src/watcher');
 const { DemoWatcher } = require('../src/demo');
@@ -10,6 +11,7 @@ const updater = require('../src/update');
 const hook = require('../src/hook');
 const { createServer, snapshot } = require('../src/server');
 const external = require('../src/external');
+const config = require('../src/config');
 const pkg = require('../package.json');
 const EXTERNAL_DIRS = external.location();
 
@@ -19,7 +21,14 @@ See what every Claude Code, Codex, Gemini CLI, Antigravity, Copilot CLI, OMP, Ki
 Usage: node bin/cli.js [options]   (or /myoffice as a skill)
 
 Options:
-  -p, --port <n>    Port to serve on (default 4545)
+  -p, --port <n>    Port to serve on (default 4545, or WMAD_PORT)
+  --host <addr>     Address to bind (default 127.0.0.1, or WMAD_HOST;
+                    0.0.0.0 to reach the dashboard from other devices)
+  --allowed-hosts <list>  Host names accepted in the Host header, comma
+                    separated, *.lan wildcards, * for any (default
+                    localhost,127.0.0.1,[::1]; or WMAD_ALLOWED_HOSTS)
+  --trust-proxy     Trust X-Forwarded-For for the client address (only
+                    behind your own reverse proxy; or WMAD_TRUST_PROXY)
   --hours <n>       Show sessions active in the last n hours (default 24)
   --omp-dir <path>  OMP sessions root (or a direct --session-dir directory)
   --no-open         Don't open the browser
@@ -50,19 +59,36 @@ Override with CLAUDE_CONFIG_DIR / CODEX_HOME / GEMINI_CLI_HOME / ANTIGRAVITY_HOM
 OMP profiles under ~/.omp/profiles are discovered automatically.
 Other clients: KIMI_CODE_HOME / DSH_HOME / GROK_HOME.
 OpenCode and Hermes need Node.js 22.13+ for its built-in node:sqlite.
+LAN access: reads stay open to the allowed hosts; update, shutdown and scene
+install are loopback-only unless WMAD_ADMIN_TOKEN_FILE (or WMAD_ADMIN_TOKEN)
+is set, then a matching "Authorization: Bearer <t>" or X-WMAD-Token unlocks
+them. WMAD_DEMO=1 is the same as --demo.
 Optional Magpie: WMAD_MAGPIE_URL=http://127.0.0.1:3430
 and WMAD_MAGPIE_KEY (web sign-in key, server-side only).
 For multiple local instances, WMAD_MAGPIE_SOURCES is a JSON array
 of {url, key} objects, used instead of the single-source variables.`;
 
 function parseArgs(argv) {
-  const o = { port: 4545, hours: 24, open: true, privacy: false, json: false, demo: false, stop: false, scenes: false, scene: null, removeScene: null, update: false };
+  // host/port/allowed-hosts/trust-proxy default to the environment (see src/config.js).
+  const o = { host: undefined, allowedHosts: undefined, trustProxy: undefined, hours: 24, open: true, privacy: false, json: false, demo: false, stop: false, scenes: false, scene: null, removeScene: null, update: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '-h' || a === '--help') { console.log(HELP); process.exit(0); }
     else if (a === '-v' || a === '--version') { console.log(pkg.version); process.exit(0); }
     else if (a === '-p' || a === '--port') o.port = Number(argv[++i]);
     else if (a.startsWith('--port=')) o.port = Number(a.slice(7));
+    else if (a === '--host') {
+      if (!argv[i + 1] || argv[i + 1].startsWith('--')) { console.error('--host requires an address'); process.exit(1); }
+      o.host = argv[++i];
+    }
+    else if (a.startsWith('--host=')) o.host = a.slice(7);
+    else if (a === '--allowed-hosts') {
+      if (!argv[i + 1] || argv[i + 1].startsWith('--')) { console.error('--allowed-hosts requires a comma list'); process.exit(1); }
+      o.allowedHosts = argv[++i];
+    }
+    else if (a.startsWith('--allowed-hosts=')) o.allowedHosts = a.slice(16); // "--allowed-hosts=".length
+    else if (a === '--trust-proxy') o.trustProxy = true;
+    else if (a === '--no-trust-proxy') o.trustProxy = false;
     else if (a === '--hours') o.hours = Number(argv[++i]);
     else if (a.startsWith('--hours=')) o.hours = Number(a.slice(8));
     else if (a === '--omp-dir') {
@@ -85,8 +111,20 @@ function parseArgs(argv) {
     else if (a === '--uninstall-hook') o.uninstallHook = true;
     else { console.error(`Unknown option: ${a}\n\n${HELP}`); process.exit(1); }
   }
-  if (!Number.isFinite(o.port) || !Number.isFinite(o.hours)) { console.error(HELP); process.exit(1); }
-  return o;
+  if (!Number.isFinite(o.hours)) { console.error(HELP); process.exit(1); }
+  let cfg;
+  try { cfg = config.resolve(o); }
+  catch (e) { console.error(`${e.message}\n\n${HELP}`); process.exit(1); }
+  return { ...o, ...cfg };
+}
+
+// IPv4 addresses of this machine for the "open this on your phone" hint.
+function lanAddresses() {
+  const out = [];
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const x of list || []) if (x && x.family === 'IPv4' && !x.internal) out.push(x.address);
+  }
+  return out;
 }
 
 function openBrowser(url) {
@@ -254,14 +292,21 @@ async function main() {
       if (err.code === 'EADDRINUSE' && tries > 0) listen(port + 1, tries - 1);
       else { console.error(err.message); process.exit(1); }
     });
-    server.listen(port, '127.0.0.1', () => {
-      const url = `http://localhost:${port}`;
+    server.listen(port, o.host, () => {
       const n = watcher.sessions().length;
-      const openUrl = url + query;
       const what = o.demo ? 'demo team' : `${n} session${n === 1 ? '' : 's'} in the last ${o.hours}h`;
+      // The page uses relative URLs, so the address it is opened with is the one
+      // every later request uses; print the LAN address when bound beyond loopback.
+      const url = `http://${o.loopback ? 'localhost' : o.host}:${port}`;
       console.log(`whatsmyagentdoing v${updater.localVersion()} → ${url}  (${what}, Ctrl+C to stop)`);
+      if (!o.loopback) {
+        const lan = lanAddresses();
+        console.log(`Listening on ${o.host}:${port}. Open ${lan.length ? lan.map((a) => `http://${a}:${port}`).join(' or ') : url} on your phone (same Wi-Fi).`);
+        if (!o.token) console.log('LAN admin (update / scene install) is off: set WMAD_ADMIN_TOKEN_FILE to enable it for curl.');
+      }
+      for (const w of o.warnings || []) console.error(`Warning: ${w}`);
       printUpdateHint();
-      if (o.open) openBrowser(openUrl);
+      if (o.open) openBrowser(url + query);
     });
   };
   listen(o.port, 10);
