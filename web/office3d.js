@@ -963,16 +963,22 @@ export class Office3D extends window.Office {
     // Fit the room into the part of the canvas the panel leaves visible, then
     // extend the frustum over the covered part so the canvas never resizes.
     const vw = Math.max(120, this.cw - this.inset());
-    const aspect = vw / this.ch;
+    // The phone bottom sheet covers the lower part: fit above it.
+    const bottomInset = this.bottomInset ? this.bottomInset() : 0;
+    const vh = Math.max(120, this.ch - bottomInset);
+    const aspect = vw / vh;
     let w = (maxX - minX) * 1.06, h = (maxY - minY) * 1.1;
     // Leave room for screen-space badges and bubbles in a small PiP window.
     if (this.compact) h *= this.ch / Math.max(80, this.ch - 48);
-    // Portrait phones fit the room by width only and letterbox vertically,
-    // instead of shrinking everything to the short side.
-    if (w / h > aspect || caps.widthOnly) h = w / aspect; else w = h * aspect;
+    // Fit into the visible area; portrait no longer forces width-only, which
+    // left the room small on a tall phone.
+    if (w / h > aspect) h = w / aspect; else w = h * aspect;
     const cxv = (minX + maxX) / 2, cyv = (minY + maxY) / 2;
     const full = w * (this.cw / vw);
-    Object.assign(this.camera, { left: cxv - w / 2, right: cxv - w / 2 + full, top: cyv + h / 2, bottom: cyv - h / 2 });
+    // Extend the frustum over the covered strip so the canvas never resizes.
+    const fullH = h * (this.ch / vh);
+    const bottomY = cyv - h / 2;
+    Object.assign(this.camera, { left: cxv - w / 2, right: cxv - w / 2 + full, top: bottomY + fullH, bottom: bottomY });
     this.camera.updateProjectionMatrix();
     // Sun casts shadows over the whole room.
     this.sun.position.set(center.x - 6, 14, center.z - 3);

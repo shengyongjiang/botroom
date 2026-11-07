@@ -16,7 +16,7 @@
   // (before it drops the query string) and leaves it on window.WMAD_DESKS.
   function roomDeskCap() {
     const n = Number(window.WMAD_DESKS);
-    return Number.isInteger(n) && n >= 2 && n <= 40 ? n : Infinity;
+    return Number.isInteger(n) && n >= 1 && n <= 40 ? n : Infinity;
   }
   const SPEED = 2.1; // tiles / second
 
@@ -262,8 +262,8 @@
     // ------------------------------------------------------------ floor plan
 
     // What the current viewport allows: the desk cap and the zoom ceiling.
-    // Portrait phones fit the room by width only (letterboxed vertically)
-    // instead of shrinking the whole floor plan to the height.
+    // The room is fitted into the visible area (minus the panel/sheet insets)
+    // on every viewport; portrait is only used to tilt the 3D camera.
     viewCaps() {
       const w = window.innerWidth || 0, h = window.innerHeight || 0;
       const phone = w > 0 && w <= 640;
@@ -273,7 +273,6 @@
         portrait,
         maxDesks: phone ? PHONE_MAX_DESKS : Infinity,
         maxZoom: phone ? 3 : 2,
-        widthOnly: phone && portrait,
       };
     }
 
@@ -330,17 +329,24 @@
         }
       };
 
-      // ---- cubicle pods: 4 desks back to back with a divider
+      // ---- cubicle pods: up to 4 desks back to back with a divider
+      // A room cap below 4 (?desks=2 on a phone) fills the north row first, so
+      // the pod holds exactly as many desks as were asked for, not always four.
+      const deskLimit = Number.isFinite(roomCap) ? roomCap : Infinity;
       for (let p = 0; p < pods; p++) {
         const c = p % podCols, r = Math.floor(p / podCols);
         const px = 1.3 + c * 4.2, py = 2.0 + r * 4.7;
         const panel = PANEL[p % PANEL.length];
+        const want = Math.max(0, Math.min(4, deskLimit - p * 4));
         for (let k = 0; k < 2; k++) {
           const x = px + k * 1.5;
-          desks.push({ x, y: py, side: 'n', seat: { x: x + 0.7, y: py - 0.45 } });
-          desks.push({ x, y: py + 0.92, side: 's', seat: { x: x + 0.7, y: py + 0.92 + 1.25 } });
-          solid(x, py, 1.4, 0.8, 0.08);
-          solid(x, py + 0.92, 1.4, 0.8, 0.08);
+          // North row first, then the south row, until the cap is reached.
+          for (const side of ['n', 's']) {
+            if (k * 2 + (side === 's' ? 1 : 0) >= want) continue;
+            const dy = side === 'n' ? py : py + 0.92;
+            desks.push({ x, y: dy, side, seat: { x: x + 0.7, y: side === 'n' ? py - 0.45 : py + 0.92 + 1.25 } });
+            solid(x, dy, 1.4, 0.8, 0.08);
+          }
         }
         longBox(px - 0.1, py + 0.82, 0, 3.15, 0.08, 1.15, this.shade(panel, 25), panel, this.shade(panel, -15), { bias: 0.05 });
         prop('panel', { x: px - 0.1, y: py + 0.82, w: 3.15, d: 0.08, h: 1.15, color: panel });
@@ -672,6 +678,21 @@
       return this.insetFrom + (this.insetTo - this.insetFrom) * e;
     }
     insetMoving(now = performance.now()) { return this.insetTo != null && now - this.insetT0 < 360; }
+    // Room at the bottom covered by the phone bottom sheet. The camera fits the
+    // room into what is left above it, so the sheet never hides desks.
+    setBottomInset(px, animate = true) {
+      const now = performance.now();
+      this.bottomFrom = animate ? this.bottomInset(now) : px;
+      this.bottomTo = px;
+      this.bottomT0 = animate ? now : -Infinity;
+    }
+    bottomInset(now = performance.now()) {
+      if (this.bottomTo == null) return 0;
+      const k = Math.min(1, (now - this.bottomT0) / 340);
+      const e = 1 - Math.pow(1 - k, 3);
+      return this.bottomFrom + (this.bottomTo - this.bottomFrom) * e;
+    }
+    bottomMoving(now = performance.now()) { return this.bottomTo != null && now - this.bottomT0 < 360; }
 
     // ------------------------------------------------------------ camera / input
 
@@ -692,14 +713,19 @@
       const left = this.iso(0, D, 0).x, right = this.iso(W, 0, 0).x;
       const top = this.iso(0, 0, WALL_H).y - 20, bottom = this.iso(W, D, 0).y + 10;
       const inset = this.inset();
+      const bottomInset = this.bottomInset();
       const vw = Math.max(120, this.cw - inset);
+      // The phone bottom sheet covers the lower part: fit above it, not under it.
+      const vh = Math.max(120, this.ch - bottomInset);
       const caps = this.viewCaps();
       const byWidth = vw / (right - left + 30);
-      const byHeight = this.ch / (bottom - top + 30);
-      const zoom = Math.min(caps.widthOnly ? byWidth : Math.min(byWidth, byHeight), caps.maxZoom);
-      const want = { zoom, ox: vw / 2 - ((left + right) / 2) * zoom, oy: this.ch / 2 - ((top + bottom) / 2) * zoom };
+      const byHeight = vh / (bottom - top + 30);
+      // Portrait used to fit by width only, which left the room small on a tall
+      // phone; now it fills whichever of width/height is the tighter fit.
+      const zoom = Math.min(byWidth, byHeight, caps.maxZoom);
+      const want = { zoom, ox: vw / 2 - ((left + right) / 2) * zoom, oy: vh / 2 - ((top + bottom) / 2) * zoom };
       // While the inset eases, follow it exactly; otherwise settle gently.
-      if (!this.cam || this.insetMoving()) this.cam = want;
+      if (!this.cam || this.insetMoving() || this.bottomMoving()) this.cam = want;
       else for (const k of ['zoom', 'ox', 'oy']) this.cam[k] += (want[k] - this.cam[k]) * 0.1;
     }
 
@@ -1393,27 +1419,40 @@
       const s = p.s || {};
       const st = s.status;
       const pal = this.pal;
-      const x = at.x, y = at.y - 6;
+      // Keep the label anchor inside the canvas: a pill centred on an agent at
+      // the left/right edge would otherwise be clipped (seen on 3D phones).
+      const edge = 6;
+      const x = Math.min(this.cw - edge, Math.max(edge, at.x));
+      const y = at.y - 6;
       c.save();
       c.textAlign = 'center';
       c.textBaseline = 'middle';
       const font = (w, px) => `${w} ${px}px ui-sans-serif, system-ui, -apple-system, "PingFang TC", "Apple Color Emoji", sans-serif`;
-      c.font = font(600, 10);
+      // Labels are drawn in room space, so a zoomed-out room (a phone) would
+      // shrink them to a few pixels. Scale them back up to at least 11px on
+      // screen, capped so a label never dwarfs the desks.
+      const lz = this.cam && this.cam.zoom ? this.cam.zoom : 1;
+      const labelScale = Math.min(2.2, Math.max(1, 11 / (10 * lz)));
+      const fs = 10 * labelScale;
+      c.font = font(600, fs);
 
       const badge = this.showAgent && AGENT_BADGES[s.agent];
       const pill = (text, fg, bg, yy, alpha = 1, identify = false) => {
         c.globalAlpha = alpha;
         let tx = text;
-        while (c.measureText(tx).width > 118 && tx.length > 2) tx = tx.slice(0, -2) + '…';
-        const extra = badge && identify ? 26 : 0;
-        const w = c.measureText(tx).width + 12 + extra;
-        const height = extra ? 22 : 16;
-        this.roundRect(x - w / 2, yy - height / 2, w, height, 8, bg);
+        // Never wider than the canvas: ellipsize, then shift the pill inside it.
+        const maxW = Math.max(40, this.cw - 8);
+        while (c.measureText(tx).width > Math.min(118 * labelScale, maxW) && tx.length > 2) tx = tx.slice(0, -2) + '…';
+        const extra = badge && identify ? 26 * labelScale : 0;
+        const w = Math.min(maxW, c.measureText(tx).width + 12 * labelScale + extra);
+        const height = (extra ? 22 : 16) * labelScale;
+        const px = Math.min(this.cw - 4 - w / 2, Math.max(4 + w / 2, x));
+        this.roundRect(px - w / 2, yy - height / 2, w, height, 8 * labelScale, bg);
         c.fillStyle = fg;
-        c.fillText(tx, x + extra / 2, yy + 0.5);
-        if (extra) this.agentBadge(badge, x - w / 2 + 13, yy);
+        c.fillText(tx, px + extra / 2, yy + 0.5);
+        if (extra) this.agentBadge(badge, px - w / 2 + 13 * labelScale, yy);
         c.globalAlpha = 1;
-        return yy - 8;
+        return yy - 8 * labelScale;
       };
 
       let top = y;

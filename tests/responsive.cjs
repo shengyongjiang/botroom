@@ -130,6 +130,44 @@ test('responsive office: desktop and portrait phones', { timeout: 180000 }, asyn
     const eight = await plan({ width: 1280, height: 800 }, '&desks=8');
     assert.equal(eight.desks, 8);
     assert.ok(eight.W >= four.W, 'a bigger cap is not smaller');
+    // D1: on a phone, ?desks=N must lower the desk count too (1..PHONE_MAX_DESKS),
+    // not just cap how many agents sit down.
+    for (const n of [1, 2, 3]) {
+      const m = await plan({ width: 390, height: 844 }, `&desks=${n}`);
+      assert.equal(m.cap, n, `desks=${n} is read`);
+      assert.equal(m.desks, n, `phone room has ${n} desks`);
+    }
+    const phone4 = await plan({ width: 390, height: 844 }, '&desks=4');
+    assert.equal(phone4.desks, 4);
+    // Above the phone cap, the phone cap wins.
+    const phone8 = await plan({ width: 390, height: 844 }, '&desks=8');
+    assert.equal(phone8.desks, 4, 'phone cap of 4 wins over desks=8');
+  });
+  // D2: the phone bottom sheet must not cover the drawn room; the camera fits
+  // the room into the space above it.
+  await t.test('phone bottom sheet does not cover the room', async () => {
+    for (const vp of [{ width: 390, height: 844 }, { width: 360, height: 800 }]) {
+      const context = await browser.newContext({ viewport: vp, locale: 'en-US' });
+      const page = await context.newPage();
+      page.on('pageerror', (e) => errors.push(`sheet ${vp.width}: ${e.message}`));
+      await page.goto(base + '/?full=1&quality=mid');
+      await settle(page);
+      await page.evaluate(() => setSide(true, false));
+      await page.waitForTimeout(900);
+      const m = await page.evaluate(() => {
+        const cam = office.cam, { W, D } = office.plan;
+        let roomBottom = -Infinity;
+        for (const x of [0, W]) for (const y of [0, D]) for (const z of [0, 2.4]) {
+          roomBottom = Math.max(roomBottom, office.iso(x, y, z).y * cam.zoom + cam.oy);
+        }
+        const sheet = document.getElementById('side').getBoundingClientRect();
+        const wrap = document.getElementById('officeWrap').getBoundingClientRect();
+        return { roomBottom: roomBottom + wrap.top, sheetTop: sheet.top, inset: office.bottomInset(), wrapH: wrap.height };
+      });
+      assert.ok(m.inset > 0, `sheet height is reserved (${m.inset})`);
+      assert.ok(m.roomBottom <= m.sheetTop + 1, `room (bottom ${Math.round(m.roomBottom)}) stays above the sheet (top ${Math.round(m.sheetTop)})`);
+      await context.close();
+    }
   });
   // Orientation swap on the same page: the room re-fits and nothing overflows.
   await t.test('orientation swap keeps the office in bounds', async () => {

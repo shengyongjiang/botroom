@@ -565,9 +565,10 @@ if (PIP) document.body.classList.add('pip');
   }
   for (const k of ['view', 'quality', 'scene', 'lang']) if (validPreference(k, q.get(k))) store.set(k, q.get(k));
   // Room size: ?desks=N caps the desks (and so the floor plan). Read before the
-  // query string is dropped below, and kept for the office to use.
+  // query string is dropped below, and kept for the office to use. 1 is allowed
+  // so a phone can ask for a one-desk room; the office clamps it to its own cap.
   const desks = Number(q.get('desks'));
-  if (Number.isInteger(desks) && desks >= 2 && desks <= 40) window.WMAD_DESKS = desks;
+  if (Number.isInteger(desks) && desks >= 1 && desks <= 40) window.WMAD_DESKS = desks;
   if (location.search) history.replaceState(null, '', location.pathname + (PIP ? '?pip=1' : ''));
 }
 
@@ -1008,6 +1009,7 @@ async function makeOffice() {
   office = mine;
   office.offDutyLabel = L.wentHome;
   office.setInset(panelInset(), false);
+  office.setBottomInset?.(sheetInset(), false);
   render();
   const ok = await mine.ready;
   if (office !== mine) return;
@@ -1181,17 +1183,36 @@ function hhmm(ms) {
   if (!ms) return '';
   return new Date(ms).toLocaleTimeString(langCode || undefined, { hour: '2-digit', minute: '2-digit' });
 }
-// How much of the office the open panel covers. On phones the panel is an
-// overlay over most of the screen, so the view doesn't move for it.
+// How much of the office the open panel covers. On phones the panel is a
+// bottom sheet, so it reserves height at the bottom instead of width at the
+// side (see sheetInset); on wider screens it is a side panel.
 function panelInset() {
   return state.full && state.side && !matchMedia('(max-width: 760px)').matches ? sideEl.getBoundingClientRect().width || 340 : 0;
+}
+// Height of the phone bottom sheet that is actually over the office, so the
+// camera can fit the room into the part above it.
+function sheetInset() {
+  if (!state.full || !state.side || !matchMedia('(max-width: 760px)').matches) return 0;
+  // While closed the sheet is translated fully off-screen, so its rect says it
+  // is below the office. Use its laid-out height (offsetHeight) instead: that
+  // is what it will cover once open, capped to 45dvh / 320px by the CSS.
+  const wrap = document.getElementById('officeWrap').getBoundingClientRect();
+  const h = sideEl.offsetHeight || sideEl.getBoundingClientRect().height;
+  return Math.max(0, Math.min(h, wrap.height));
+}
+function applyInsets(animate = true) {
+  office?.setInset(panelInset(), animate);
+  office?.setBottomInset?.(sheetInset(), animate);
 }
 function setSide(open, remember = true) {
   state.side = open;
   if (remember) store.set('side', open);
   document.body.classList.toggle('side-closed', !open);
   const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
-  office?.setInset(panelInset(), !still);
+  applyInsets(!still);
+  // The sheet's size is only final after layout (it is translated off-screen
+  // while closed), so measure once more on the next frame.
+  requestAnimationFrame(() => applyInsets(!still));
   if (open) {
     // Rows slide in one after another each time the panel opens.
     sideEl.classList.remove('opening'); void sideEl.offsetWidth; sideEl.classList.add('opening');
@@ -1371,7 +1392,7 @@ addEventListener('resize', () => {
   measureBar();
   const caps = officeCaps();
   if (`${caps.phone ? 'phone' : 'wide'}:${caps.portrait ? 'portrait' : 'landscape'}` !== officeShape) makeOffice();
-  else { office?.resize(); office?.setInset(panelInset(), false); }
+  else { office?.resize(); applyInsets(false); }
   if (matchMedia('(max-width: 760px)').matches) setSide(false, false);
 });
 if (state.full) {
