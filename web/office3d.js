@@ -953,32 +953,59 @@ export class Office3D extends window.Office {
     this.camera.zoom = Math.min(2, Math.max(0.6, this.camera.zoom));
     this.camera.lookAt(this.controls.target);
     this.camera.updateMatrixWorld(true);
-    // Fit the room's corners into the view.
-    const inv = this.camera.matrixWorldInverse;
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (const x of [0, W]) for (const y of [0, this.plan.viewH || WALL_H]) for (const z of [0, D]) {
-      const v = new THREE.Vector3(x, y, z).applyMatrix4(inv);
-      minX = Math.min(minX, v.x); maxX = Math.max(maxX, v.x); minY = Math.min(minY, v.y); maxY = Math.max(maxY, v.y);
-    }
-    // Fit the room into the part of the canvas the panel leaves visible, then
-    // extend the frustum over the covered part so the canvas never resizes.
+    // Fit the room by what it actually projects to on screen. Camera-space Y
+    // mixes depth and height for a tilted camera, so measuring there made the
+    // room overflow the frustum on a phone. Project the corners through a unit
+    // frustum instead, then scale/offset so they land inside the visible strip.
     const vw = Math.max(120, this.cw - this.inset());
     // The phone bottom sheet covers the lower part: fit above it.
     const bottomInset = this.bottomInset ? this.bottomInset() : 0;
     const vh = Math.max(120, this.ch - bottomInset);
-    const aspect = vw / vh;
-    let w = (maxX - minX) * 1.06, h = (maxY - minY) * 1.1;
+    // Measure with a neutral projection: the camera's own zoom scales the
+    // projection matrix, and the fit must not depend on the zoom it is about
+    // to replace (a zoomed-in camera would report the room far outside +-1).
+    const keepZoom = this.camera.zoom;
+    this.camera.zoom = 1;
+    Object.assign(this.camera, { left: -1, right: 1, top: 1, bottom: -1 });
+    this.camera.updateProjectionMatrix();
+    this.camera.updateMatrixWorld(true);
+    const proj = this.camera.projectionMatrix.clone().multiply(this.camera.matrixWorldInverse);
+    const corner = new THREE.Vector3();
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const x of [0, W]) for (const y of [0, this.plan.viewH || WALL_H]) for (const z of [0, D]) {
+      corner.set(x, y, z).applyMatrix4(proj);
+      minX = Math.min(minX, corner.x); maxX = Math.max(maxX, corner.x);
+      minY = Math.min(minY, corner.y); maxY = Math.max(maxY, corner.y);
+    }
+    this.camera.zoom = keepZoom;
+    // At the unit frustum the projected ndc equals the camera-space X/Y, so
+    // [minX,maxX] x [minY,maxY] is the room in camera space. A little air:
+    const airX = (maxX - minX) * 0.06, airY = (maxY - minY) * 0.1;
+    const x0 = minX - airX, x1 = maxX + airX;
+    let y0 = minY - airY, y1 = maxY + airY;
     // Leave room for screen-space badges and bubbles in a small PiP window.
-    if (this.compact) h *= this.ch / Math.max(80, this.ch - 48);
-    // Fit into the visible area; portrait no longer forces width-only, which
-    // left the room small on a tall phone.
-    if (w / h > aspect) h = w / aspect; else w = h * aspect;
-    const cxv = (minX + maxX) / 2, cyv = (minY + maxY) / 2;
-    const full = w * (this.cw / vw);
-    // Extend the frustum over the covered strip so the canvas never resizes.
-    const fullH = h * (this.ch / vh);
-    const bottomY = cyv - h / 2;
-    Object.assign(this.camera, { left: cxv - w / 2, right: cxv - w / 2 + full, top: bottomY + fullH, bottom: bottomY });
+    if (this.compact) { const e = (y1 - y0) * 0.06; y0 -= e; y1 += e; }
+    // A frustum [l,r] maps camera X to ndc = k*X + b (k = 2/(r-l)), and ndc to
+    // screen px as (ndc+1)/2*cw. The room is (x1-x0)*k*cw/2 px wide, so the k
+    // that fits it inside the strip on the tighter axis is:
+    // camera.zoom multiplies the projected size (measured: px scales with
+    // zoom/halfExtent), so the frustum half-extent must be divided by zoom for
+    // the room to land at the intended size.
+    const z = this.camera.zoom || 1;
+    const k = Math.min(vw / ((x1 - x0) * this.cw / 2), vh / ((y1 - y0) * this.ch / 2)) / z;
+    const pxW = z * (x1 - x0) * k * this.cw / 2, pxH = z * (y1 - y0) * k * this.ch / 2;
+    // Centre it in the strip: its left edge at (vw-pxW)/2, top at (vh-pxH)/2.
+    // The zoom scales the whole ndc, so the target ndc is divided by zoom too.
+    const bx = (2 * ((vw - pxW) / 2) / this.cw - 1) / z - k * x0;
+    const by = (1 - 2 * ((vh - pxH) / 2) / this.ch) / z - k * y1;
+    // ndc = k*X + b with k = 2/(r-l) and b = -(l+r)/(r-l)  =>  r-l = 2/k,
+    // l+r = -2b/k. Same on Y.
+    const spanX = 2 / k, sumX = -2 * bx / k;
+    const spanY = 2 / k, sumY = -2 * by / k;
+    Object.assign(this.camera, {
+      left: (sumX - spanX) / 2, right: (sumX + spanX) / 2,
+      bottom: (sumY - spanY) / 2, top: (sumY + spanY) / 2,
+    });
     this.camera.updateProjectionMatrix();
     // Sun casts shadows over the whole room.
     this.sun.position.set(center.x - 6, 14, center.z - 3);
@@ -991,6 +1018,15 @@ export class Office3D extends window.Office {
 
   setInset(px, animate = true) {
     super.setInset(px, animate);
+    this.insetSettling = true;
+    if (!animate && this.room) this.fitCamera3D(false);
+  }
+
+  // The phone bottom sheet changes the visible height, so the camera has to
+  // re-fit exactly like it does for the side panel (the 2D base class only
+  // stores the value; the render loop would otherwise keep the old frustum).
+  setBottomInset(px, animate = true) {
+    super.setBottomInset(px, animate);
     this.insetSettling = true;
     if (!animate && this.room) this.fitCamera3D(false);
   }

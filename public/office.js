@@ -1430,9 +1430,12 @@
       const font = (w, px) => `${w} ${px}px ui-sans-serif, system-ui, -apple-system, "PingFang TC", "Apple Color Emoji", sans-serif`;
       // Labels are drawn in room space, so a zoomed-out room (a phone) would
       // shrink them to a few pixels. Scale them back up to at least 11px on
-      // screen, capped so a label never dwarfs the desks.
+      // screen. On a phone the cap is lifted (the zoom there is ~0.40, which
+      // needs ~2.75), because legibility matters more than label bulk; on wider
+      // screens the old 2.2 cap still keeps a label from dwarfing the desks.
       const lz = this.cam && this.cam.zoom ? this.cam.zoom : 1;
-      const labelScale = Math.min(2.2, Math.max(1, 11 / (10 * lz)));
+      const cap = this.viewCaps().phone ? Infinity : 2.2;
+      const labelScale = Math.min(cap, Math.max(1, 11 / (10 * lz)));
       const fs = 10 * labelScale;
       c.font = font(600, fs);
 

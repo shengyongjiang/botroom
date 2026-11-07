@@ -119,14 +119,17 @@ rebuilt from the number of desks it has to hold.
   `http://<lan-address>:4546/?desks=8`. It is read once at page load. On a
   phone it is clamped to 1–4, so `?desks=2` really builds a 2-desk room and
   `?desks=8` still gives 4. Below 4 the pod fills the north row first.
-- Portrait phones fit the room into the space available (width **and** height);
-  the room is width-bound, so it spans the full width and is centred.
-- Agent labels are drawn at a readable size even when the room is zoomed out
-  (at least ~11 px on screen) and stay inside the canvas instead of being
-  clipped at the left/right edge.
+- Portrait phones fit the room into the space available (width **and** height),
+  centred in it.
+- Agent labels are drawn at a readable size even when the room is zoomed out:
+  **at least 11 px on screen** in both 2D and 3D (the phone cap is lifted,
+  because the phone zoom is ~0.40–0.44). They are ellipsized and kept inside the
+  canvas instead of being clipped at the left/right edge.
 - The agent panel becomes a bottom sheet (`min(45dvh, 320px)`). Its height is
-  reserved: the camera fits the room into the space **above** the sheet, so
-  opening the panel never hides desks. The page never scrolls sideways.
+  reserved in **both** renderers: the camera fits the room into the space
+  **above** the sheet (in 3D the frustum is solved so the projected room lands
+  in that strip), so opening the panel never hides desks. The page never
+  scrolls sideways.
 
 ### Still hardcoded (honest list)
 
@@ -137,7 +140,8 @@ rebuilt from the number of desks it has to hold.
 | 760 px bottom-sheet breakpoint | `public/index.html` CSS | sheet height `min(45dvh, 320px)` |
 | Room width/depth floors | `buildPlan()` | `D ≥ 14.5`, right column 7.2 wide, meeting room 5.2 deep |
 | Pod pitch | `buildPlan()` | 4.2 × 4.7 tiles per pod; one pod = one column |
-| 3D camera | `fitCamera3D()` | distance 40, lift 0.58 (1.15 portrait), `camera.zoom` clamped `[0.6, 2]` |
+| 3D camera | `fitCamera3D()` | distance 40, lift 0.58 (1.15 portrait), `camera.zoom` clamped `[0.6, 2]`; the frustum is solved from the projected room and the visible strip (side panel + bottom sheet) |
+| Label size | `bubble()`, `public/office.js` | 11 px on screen minimum; 2.2× cap on desktop, no cap on phones |
 | Fit zoom ceiling | `viewCaps().maxZoom` | 3 on phones, 2 on wider screens (2D) |
 | 7 wanderers | `MAX_WANDERERS` | off-duty agents walking around |
 

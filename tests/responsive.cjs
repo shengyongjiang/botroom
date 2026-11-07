@@ -169,6 +169,79 @@ test('responsive office: desktop and portrait phones', { timeout: 180000 }, asyn
       await context.close();
     }
   });
+  // D2 in 3D: the camera frustum must put the whole room above the sheet too.
+  // The room is measured by projecting its corners through the real camera.
+  await t.test('3D phone bottom sheet does not cover the room', async () => {
+    for (const vp of [{ width: 390, height: 844 }, { width: 360, height: 800 }]) {
+      const context = await browser.newContext({ viewport: vp, locale: 'en-US' });
+      const page = await context.newPage();
+      page.on('pageerror', (e) => errors.push(`3D sheet ${vp.width}: ${e.message}`));
+      await page.goto(base + '/?full=1&quality=high');
+      try {
+        await page.waitForFunction(() => typeof office !== 'undefined' && office && office.gl && office.framesShown > 4, null, { timeout: 25000 });
+      } catch {
+        t.diagnostic(`${vp.width}x${vp.height}: WebGL unavailable, 3D sheet test skipped`);
+        await context.close();
+        continue;
+      }
+      await page.waitForTimeout(1000);
+      await page.evaluate(() => setSide(true, false));
+      await page.waitForTimeout(1200);
+      const m = await page.evaluate(() => {
+        const cam = office.camera, { W, D } = office.plan;
+        const V = office.controls.target.constructor;
+        let top = Infinity, bottom = -Infinity;
+        for (const x of [0, W]) for (const y of [0, 2.4]) for (const z of [0, D]) {
+          const v = new V(x, y, z).project(cam);
+          const sy = (1 - v.y) / 2 * office.ch;
+          top = Math.min(top, sy); bottom = Math.max(bottom, sy);
+        }
+        const wrap = document.getElementById('officeWrap').getBoundingClientRect();
+        const sheet = document.getElementById('side').getBoundingClientRect();
+        return { roomTop: top + wrap.top, roomBottom: bottom + wrap.top, sheetTop: sheet.top, inset: office.bottomInset(), ch: office.ch };
+      });
+      assert.ok(m.inset > 0, `sheet height is reserved (${m.inset})`);
+      assert.ok(m.roomBottom <= m.sheetTop + 1,
+        `3D room (bottom ${Math.round(m.roomBottom)}) stays above the sheet (top ${Math.round(m.sheetTop)})`);
+      assert.ok(m.roomTop >= -1, `3D room (top ${Math.round(m.roomTop)}) is not above the canvas`);
+      await context.close();
+    }
+  });
+  // 2D phone labels must render at >= 11px on screen, whatever the room zoom is.
+  await t.test('2D phone labels are at least 11px on screen', async () => {
+    for (const vp of [{ width: 360, height: 800 }, { width: 390, height: 844 }]) {
+      const context = await browser.newContext({ viewport: vp, locale: 'en-US' });
+      const page = await context.newPage();
+      page.on('pageerror', (e) => errors.push(`labels ${vp.width}: ${e.message}`));
+      await page.goto(base + '/?full=1&quality=mid');
+      await settle(page);
+      // Record the font sizes bubble() actually sets, then undo the wrapper.
+      const m = await page.evaluate(() => new Promise((resolve) => {
+        const proto = Object.getPrototypeOf(office);
+        const orig = proto.bubble;
+        const fonts = [];
+        proto.bubble = function (...a) {
+          // The label pill sets ctx.font right before it draws; read it there.
+          const ctx = this.ctx;
+          const fill = ctx.fillText;
+          ctx.fillText = function (t, ...rest) { fonts.push(ctx.font); return fill.call(this, t, ...rest); };
+          try { return orig.apply(this, a); } finally { ctx.fillText = fill; }
+        };
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          proto.bubble = orig;
+          const zoom = office.cam.zoom;
+          // The agent pill is the largest text bubble() draws (the small 9-10px
+          // ones are status glyphs and the room's own signs).
+          const px = fonts.map((f) => parseFloat(/(\d+(?:\.\d+)?)px/.exec(f)?.[1] || 0)).filter((n) => n > 0);
+          const labelFont = Math.max(...px);
+          resolve({ zoom, labelFont, onScreen: labelFont * zoom });
+        }));
+      }));
+      assert.ok(m.labelFont > 0, 'labels were drawn');
+      assert.ok(m.onScreen >= 11 - 0.05, `label on screen ${m.onScreen.toFixed(2)}px >= 11px (font ${m.labelFont.toFixed(2)}px, zoom ${m.zoom.toFixed(3)})`);
+      await context.close();
+    }
+  });
   // Orientation swap on the same page: the room re-fits and nothing overflows.
   await t.test('orientation swap keeps the office in bounds', async () => {
     const context = await browser.newContext({ viewport: { width: 390, height: 844 }, locale: 'en-US' });
