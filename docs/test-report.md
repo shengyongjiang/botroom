@@ -394,3 +394,200 @@ scroll sideways.
 3. Carried over from the first report: a from-scratch `docker build` was not
    re-run, and all LAN checks are host-side, not from a physical phone.
 
+# Final re-test after 4e35c13
+
+Independent re-test of `feat/lan-docker-mobile` at commit **`4e35c13`**
+("Fit the 3D room above the phone sheet, raise phone label size to 11px"), run by
+a tester who did not write the code. No application code was changed. This
+section re-checks the two open defects from the previous report (D2 in 3D, 2D
+phone label size) **against the live container**, not only against the test
+assertions, and re-runs the full regression set.
+
+- **Repo state:** local `HEAD` = `origin/feat/lan-docker-mobile` =
+  `4e35c13945ac5a24b9409a60b7ca68d8aa74aa33`; working tree clean before and
+  after the run.
+- **Live target:** container `botroom-lan` (`botroom:lan`, healthy, up),
+  host port **4546**. Port 4545 and every other container were left untouched.
+- **Byte identity:** `sha256sum` of `public/office.js`, `public/office3d.js`
+  and `public/index.html` inside the container (`/app/...`) equals the local
+  files: `e43fb225…b65`, `58c8d502…82a`, `008c31d6…66b` — **IDENTICAL**.
+- **Measurement method:** system Chrome 156 via Playwright
+  (`channel: 'chrome'`, viewport + `deviceScaleFactor: 1`), loading
+  `http://127.0.0.1:4546`. The 3D room box is the **projection of every
+  vertex of the live `office.room` group** through the real camera (not the
+  test's 8-corner box); labels are read from the real `roundRect`/`fillText`
+  calls of the live `bubble()`.
+- **Environment caveat (not a product defect):** Playwright's bundled Chromium
+  is not installed on this host (`~/Library/Caches/ms-playwright` does not
+  exist), so the default `npm run test:ui*` fail at `chromium.launch`. The
+  suites were run with their documented switch `WMAD_UI_CHANNEL=chrome`
+  (system Chrome). `tests/responsive.cjs` has no such switch; it was run
+  unchanged with `chromium.launch` redirected to `channel: 'chrome'` by a
+  wrapper outside the repo. `npm run test:ui:clients` is `require('./ui.cjs')`
+  with `WMAD_UI_CLIENTS_ONLY=1`, so as a bare file in `node --test tests/*.cjs`
+  it re-runs the full UI suite.
+
+## F1. 3D phone, bottom sheet open — PASS
+
+Sheet opened both programmatically (`setSide(true, false)`) and by a real tap
+on the "Agents" tab; identical results.
+
+| Viewport | Sheet top | Room bbox top | Room bbox bottom | Covered | **Room width fraction** | Result |
+|---|---|---|---|---|---|---|
+| 360×800 | 480.0 | 93.1 | 445.1 | **0 px** (34.9 px gap) | **0.547** (81.6–278.4 of 360) | PASS |
+| 390×844 | 524.0 | 96.4 | 485.4 | **0 px** (38.6 px gap) | **0.570** (83.8–306.2 of 390) | PASS |
+
+- Sheet closed for comparison: room spans 90.1 % of the canvas width at both
+  sizes (bottom 718.1 / 757.2, i.e. under where the sheet will be). Opening the
+  sheet re-fits the camera (`bottomInset` 0 → 320) and the room shrinks to
+  ~55–57 % width — smaller but still the dominant object in the strip above the
+  sheet (height fraction 0.48–0.50 of the canvas; the room is centred in the
+  320 px strip with ~35–39 px of air below it).
+- Desktop 1280×800 with the side panel open: room x 47.1–892.9, panel starts at
+  x 940 — no overlap (the panel is a side panel there, not a bottom sheet).
+- Screenshot `final-390x844-3d-sheet-open.png` shows the room fully above the
+  "Agents" sheet.
+
+## F2. 2D phone label size — PASS (size) / overlap noted
+
+The font actually used for the name pill was read from the live `ctx.font` at
+the pill's `fillText`, per person, over 8 s (≈480 frames).
+
+| Viewport | 2D zoom | Pill font | **On-screen size** | Frames with a sub-11 px pill | Result |
+|---|---|---|---|---|---|
+| 360×800 | 0.4041 | 27.22 px | **11.00 px** | 0 / 481 | PASS |
+| 390×844 | 0.4378 | 25.13 px | **11.00 px** | 0 / 480 | PASS |
+
+Every person (work, wander, leave) draws its name pill at 11.00 px on screen;
+desktop keeps the 2.2× cap. This matches the documented "at least 11 px".
+
+**Label overlap (reported, not a regression):** with the room zoomed out and
+labels enlarged, pills overlap heavily on phones — 6–23 overlapping pairs per
+frame at both sizes, including the large work labels (e.g. at 360×800
+`design-system`/`cost-report` 245×43 px, `workspace-cli-tools`/`billing`
+178×53 px; at 390×844 `design-system`/`cost-report` 226×39 px). Overlap is
+slightly lower with fewer desks (`?desks=2`: 8 pairs at 360×800). The room is
+still readable between the pills, and this is the direct cost of the 11 px
+requirement at zoom ≈ 0.40; it is worth a follow-up (e.g. collision-aware
+label placement), not a blocker.
+
+## F3. 3D labels not clipped — PASS
+
+Every 3D name pill drawn by the live overlay, 20 frames per state, checked
+against the canvas (0–cw × 0–ch):
+
+| Viewport | Pills/frame | Clipped, sheet closed | Clipped, sheet open |
+|---|---|---|---|
+| 1280×800 | 12 | 0 | 0 |
+| 360×800 | 12 | 0 | 0 |
+| 390×844 | 9 | 0 | 0 |
+
+No pill leaves the canvas or is cut at the left/right edge or the top. 3D
+labels also stay above the sheet when it is open (0 of 11 pills below the
+sheet top at both sizes). In 2D with the sheet open, 2–3 pills per frame sit
+partly under the canvas top edge (clipped at y≈0, e.g. `ml-eval@6` at
+390×844): the sheet shrinks the strip and the camera re-centres, so agents
+walking at the room's far edge lose the top of their pill. This is the 2D
+counterpart of the 3D case and is cosmetic (the agent is still visible).
+
+## F4. Regression — D1 `?desks=` at 390×844 — PASS
+
+Live container, phone viewport, 2D and 3D:
+
+| `?desks=` | 2D desks | 3D desks | Notes |
+|---|---|---|---|
+| 1 | 1 | 1 | |
+| 2 | 2 | 2 | |
+| 3 | 3 | 3 | |
+| 4 | 4 | 4 | |
+| 8 | 4 | 4 | phone cap of 4 wins |
+| 0 | 4 | 4 | invalid → default |
+| 99 | 4 | 4 | clamped to phone cap |
+
+No page errors, no horizontal overflow in any of the 14 page loads.
+
+## F5. Regression suites — PASS
+
+All commands run with `env -u WMAD_*` (clean environment).
+
+| Command | Result | Count |
+|---|---|---|
+| `node --test` on the 12 non-browser files of `tests/*.cjs` | PASS | 109 tests, 109 pass, 0 fail, 0 skipped |
+| `tests/responsive.cjs` (via system-Chrome wrapper) | PASS | 10 tests, 10 pass (incl. the new 3D sheet and 11 px label tests) |
+| `npm run test:ui` (`WMAD_UI_CHANNEL=chrome`) | PASS | 29 PASS, 0 FAIL |
+| `npm run test:ui:clients` (`WMAD_UI_CHANNEL=chrome`) | PASS | 18 PASS, 0 FAIL |
+
+The 109 + 10 + 29 = 148 is the `tests/*.cjs` total; `ui.cjs` and
+`ui-clients.cjs` are the same 29 checks counted once. Without the Chrome
+switch, `ui.cjs`, `ui-clients.cjs` and `responsive.cjs` cannot start on this
+host (missing bundled Chromium, see the caveat above).
+
+## F6. Container HTTP (port 4546) — PASS
+
+Mac-host `curl` (not a phone):
+
+| Path | 127.0.0.1:4546 | 192.168.1.139:4546 |
+|---|---|---|
+| `GET /api/ping` | 200 `application/json` | 200 |
+| `GET /` | 200 `text/html`, 84 365 B | 200, same size |
+| `GET /events` | 200 `text/event-stream`, `data: {"now":…,"sessions":[…]` | 200, same |
+| `GET /office3d.js` | 200 `text/javascript`, 722 782 B | 200, same size |
+
+8/8 = 200. The LAN-IP request is sent from the host's own network stack, so the
+container sees it as loopback; this is **not** a physical-phone test.
+
+## F7. Admin routes with spoofed headers — PASS
+
+From `192.168.1.139:4546`: `POST /api/update`, `POST /api/shutdown`,
+`POST /api/scenes/install` (each with its `x-whatsmyagentdoing` header) × 10
+variants (plain, `X-Forwarded-For: 127.0.0.1`, `Forwarded: for=127.0.0.1`,
+`X-Real-IP: 127.0.0.1`, `Host: localhost`, `Host: localhost:4546`,
+`Origin: http://localhost:4546`, `Origin: http://evil.example`, all spoofs
+combined plus bogus `Authorization`/`X-WMAD-Token`) plus `GET` on each path.
+
+- **30/30 POSTs → 403** `{"ok":false,"error":"admin disabled on LAN"}`.
+- **3/3 GETs → 404.**
+- Afterwards: container `running (healthy)`, `RestartCount=0`, `/api/ping` 200.
+
+## F8. Docker security posture — PASS
+
+`docker inspect botroom-lan` after the whole run: `User=node` (process runs as
+uid 1000), `Privileged=false`, `ReadonlyRootfs=true`, `CapDrop=[ALL]`,
+`CapAdd=[]`, `SecurityOpt=[no-new-privileges:true]`, **`Mounts=0`**,
+`Binds=0`, `VolumesFrom=[]`, `Devices=0`, tmpfs only `/tmp` and
+`/home/node/.whatsmyagentdoing`, `PortBindings 4546→4546`, `RestartCount=0`.
+No HOME, log, PID or docker-socket mounts. Port 4545 untouched.
+
+## F9. Horizontal overflow — PASS
+
+`documentElement.scrollWidth − innerWidth`, sheet closed and open, 2D and 3D:
+**0 at all 8 combinations** (1280×800, 360×800, 390×844, 844×390).
+
+## F10. Screenshots of the live container — PASS
+
+Saved under `.screenshots-tmp/` (git-ignored): `final-390x844-2d.png`,
+`final-390x844-3d.png`, `final-390x844-3d-sheet-open.png`,
+`final-360x800-2d.png`, `final-1280x800-2d.png` (plus
+`final-{360x800,1280x800}-3d-sheet-open.png`). All are real captures of
+`http://127.0.0.1:4546`, at the exact viewport sizes.
+
+## Summary
+
+| Item | Result |
+|---|---|
+| F1 · 3D phone, sheet open (bbox bottom ≤ sheet top, width fraction) | **PASS** (0 px covered; 0.547 / 0.570 width) |
+| F2 · 2D phone label ≥ 11 px | **PASS** (11.00 px at both sizes); overlap noted |
+| F3 · 3D labels not clipped | **PASS** (0 clipped, closed and open) |
+| F4 · `?desks=` 1,2,3,4,8,0,99 at 390×844 | **PASS** |
+| F5 · test suites | **PASS** (109 + 10 + 29 + 18) |
+| F6 · HTTP 200 × 2 hosts | **PASS** (8/8) |
+| F7 · admin 403 with spoofs | **PASS** (30/30) |
+| F8 · container non-root, not privileged, no mounts | **PASS** |
+| F9 · no horizontal overflow | **PASS** (8/8) |
+| F10 · live screenshots | **PASS** |
+
+**Overall: PASS.** Both open defects from the previous report are fixed and
+verified against the live container. Remaining non-blocking observations:
+2D phone labels overlap each other (cost of the 11 px minimum at zoom ≈ 0.40),
+2D pills at the room's far edge are clipped by the canvas top when the sheet is
+open, and all LAN checks are host-side (not from a physical phone).
