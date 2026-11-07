@@ -196,3 +196,201 @@ Repro: 390×844, open the agent panel → bottom row of desks sits under the she
 
 Screenshots (kept outside the repo) cover desktop 1280×800, phones 360×800 and
 390×844, landscape 844×390, each in 2D and 3D.
+
+---
+
+# Re-test after fe5afdb
+
+Second independent pass over the fixes in `fe5afdb` ("Fix tester defects D1 and
+D2, keep phone labels readable"), by the same tester. No application code was
+changed; the only file this pass writes is this report.
+
+- Commit under test: `fe5afdb108c8201c7619344f7e61549932e98ed5`, branch
+  `feat/lan-docker-mobile`, `git rev-parse HEAD` equal to
+  `origin/feat/lan-docker-mobile`, working tree clean before the run.
+- The running container serves **this** commit: `GET /` and `GET /office3d.js`
+  from port 4546 are byte-identical to the worktree's `public/index.html` and
+  `public/office3d.js` (`cmp` clean), and the served page contains the new
+  `sheetInset`/`bottomInset` code. So the measurements below exercise the fixes,
+  not a stale image.
+- Environment: macOS host, OrbStack Docker, container `botroom-lan` on host port
+  **4546**; port 4545 (local demo, PID unchanged) and the other 12 containers
+  untouched. Node 24.16.0, Playwright Chromium (headless).
+- Every command ran under `env -u WMAD_ALLOWED_HOSTS -u WMAD_DEMO -u WMAD_PORT`.
+- "LAN IP" is the host's own LAN address, reached from the host. As in §2, that
+  path reaches the container as loopback; it is not a physical-phone test.
+
+## Verdict (re-test)
+
+**FAIL.** D1 is fully fixed, the 3D-label clipping fix holds, and all regression
+suites and container/security checks pass. **D2 is fixed in 2D but still fails in
+3D**, and the 2D phone label size requirement is **not met**. Both were claimed
+fixed in `fe5afdb`.
+
+| Item | Result |
+|---|---|
+| D1 `?desks=N` lowers the phone desk count (2D and 3D) | **PASS** |
+| D2 phone bottom sheet does not cover the drawn room, 2D | **PASS** |
+| D2 phone bottom sheet does not cover the drawn room, 3D | **FAIL** (still covers ~377–382 px) |
+| 3D phone labels not clipped at the left edge | **PASS** |
+| 2D phone labels ≥ ~11 px on screen | **FAIL** (≈8.9 px at 360×800, ≈9.6 px at 390×844) |
+| `node --test tests/*.cjs` | **PASS** (119/119) |
+| `npm run test:ui` | **PASS** (29/29) |
+| `npm run test:ui:clients` | **PASS** (18/18) |
+| Container healthy, 200 on 4 paths × 2 addresses | **PASS** (8/8) |
+| Admin routes 403 with spoofed headers | **PASS** (27/27 403, 3/3 GET 404) |
+| `docker inspect`: non-root, not privileged, no mounts | **PASS** |
+| No horizontal overflow, 4 viewports × 2 modes | **PASS** (8/8) |
+
+Counts: **10 PASS, 2 FAIL** of the 12 functional items; 3/3 suites, 8/8 HTTP
+paths, 27/27 admin negatives, 8/8 overflow checks.
+
+## R1. D1 — `?desks=N` on a phone (390×844) — PASS
+
+Measured on the live container with the office's own `plan.desks.length`:
+
+| `?desks=` | 2D desks | 3D desks | `WMAD_DESKS` | Room W×D (tiles) |
+|---|---|---|---|---|
+| (none) | 4 | 4 | – | 12.4×14.5 |
+| 1 | **1** | **1** | 1 | 12.4×14.5 |
+| 2 | **2** | **2** | 2 | 12.4×14.5 |
+| 3 | **3** | **3** | 3 | 12.4×14.5 |
+| 4 | 4 | 4 | 4 | 12.4×14.5 |
+| 8 | 4 (phone cap) | 4 (phone cap) | 8 | 12.4×14.5 |
+| 0 | 4 (ignored) | 4 (ignored) | – | 12.4×14.5 |
+| 99 | 4 (ignored) | 4 (ignored) | – | 12.4×14.5 |
+
+16/16 combinations correct, zero page errors, zero horizontal overflow. The
+original repro (`?desks=2` → 4 desks) now gives 2 desks in both renderers. The
+floor plan's outer W×D is unchanged (the room shell keeps its floors); the pod
+holds fewer desks, which is what D1 asked for. `tests/responsive.cjs` now
+covers 1, 2, 3, 4 and 8 at phone width.
+
+## R2. D2 — phone bottom sheet vs drawn room — FAIL (3D)
+
+Method: room bounds are the projection of the floor/wall corners `(0..W, 0..WALL_H,
+0..D)` through the office's own camera (2D: `iso()` + `cam`; 3D:
+`camera.matrixWorldInverse` + `projectionMatrix`), converted to viewport pixels.
+The sheet's rect is `#side`. Sampled for ~3 s after opening and judged on the
+settled state (the first samples are still inside the 340 ms ease).
+
+| Viewport | Mode | Sheet top | Room bottom (sheet open) | Covered by sheet | Result |
+|---|---|---|---|---|---|
+| 360×800 | 2D | 480 | 375 | **0 px** | PASS |
+| 360×800 | 3D | 480 | 861.7 | **381.7 px** | FAIL |
+| 390×844 | 2D | 524 | 405.7 | **0 px** | PASS |
+| 390×844 | 3D | 524 | 901.0 | **377.0 px** | FAIL |
+
+- **2D is fixed.** `sheetInset()` returns 320 and the room is centred in the
+  space above the sheet (390×844: room y 183.7–405.7, sheet top 524; the lowest
+  desk is at y≈265). The sheet no longer hides any desk.
+- **3D still fails.** `fitCamera3D()` does compute `vh = ch - bottomInset` and
+  widens the frustum, but the room is not inside that frustum. At 390×844 with
+  the sheet open: `bottomInset=320`, `vh=463`, frustum `top=28.88`,
+  `bottom=-11.60`; the far floor corner `(W,0,D)` projects to ndcY **-1.146**
+  (below the frustum's -1) and the room spans screen y 452–901 while the sheet
+  starts at 524. A screenshot at 390×844 3D with the panel open shows only a
+  sliver of the room above the sheet; the rest is behind it. The new committed
+  test ("phone bottom sheet does not cover the room") only exercises the 2D
+  office, so the suite does not catch this.
+- Repro: `http://<LAN IP>:4546/?full=1&quality=high` at 390×844, open the agent
+  panel → the room sits mostly under the sheet.
+
+## R3. 3D phone labels at the left edge — PASS
+
+Instrumented the office's `roundRect` to capture the pill boxes actually drawn
+(10 frames per viewport, labels move as agents walk):
+
+| Viewport | Pills sampled | Clipped (x<0 or x+w>canvas) | x range | Pill height |
+|---|---|---|---|---|
+| 360×800 | 2 384 | **0** | 10.3–351.8 (canvas 0–360) | 16–24.2 px |
+| 390×844 | 2 286 | **0** | 4.0–305.5 (canvas 0–390) | 16–24.2 px |
+
+No pill leaves the canvas and none is cut at the left edge.
+
+## R4. 2D phone label size — FAIL
+
+The label size formula is `labelScale = min(2.2, max(1, 11 / (10 * zoom)))`, so
+the on-screen size is `10 * labelScale * zoom`. On a phone the 2D fit is
+width-bound (`byWidth` 0.404 / 0.438 vs `byHeight` 1.303 / 1.38), the zoom is
+below 0.5, and the 2.2 cap binds:
+
+| Viewport | 2D zoom | labelScale | Font drawn | On-screen size | Required | Result |
+|---|---|---|---|---|---|---|
+| 360×800 | 0.404 | 2.2 (capped) | 22 px | **8.9 px** | ≥ ~11 px | FAIL |
+| 390×844 | 0.438 | 2.2 (capped) | 22 px | **9.6 px** | ≥ ~11 px | FAIL |
+
+Confirmed by spying on the real `ctx.font` used by the label pills
+(`600 22px …`) and by the drawn pill heights (35.2 px = 16×2.2). The 2.2 cap
+prevents reaching 11 px at these zooms; reaching it would need
+`11 / (10 × 0.404) = 2.72` at 360×800. `docs/run.md` states "at least ~11 px on
+screen", so the doc and the code disagree.
+
+## R5. Regression suites — PASS
+
+| Command | Result | Count |
+|---|---|---|
+| `node --test tests/*.cjs` | PASS | 119 tests, 119 pass, 0 fail, 0 skipped |
+| `npm run test:ui` | PASS | 29 `PASS`, 0 `FAIL` (TOTAL 29) |
+| `npm run test:ui:clients` | PASS | 18 `PASS`, 0 `FAIL` (TOTAL 18) |
+
+`tests/*.cjs` is one more than the first report's 118 — the new phone-`?desks=`
+and bottom-sheet tests. The LAN gate tests (`X-Forwarded-For` ignored without
+`--trust-proxy`, spoofed XFF/Forwarded/Origin from a LAN peer 403 with
+trust-proxy on and off) and the responsive tests all pass.
+
+## R6. Container HTTP (port 4546) — PASS
+
+| Path | 127.0.0.1:4546 | 192.168.1.139:4546 |
+|---|---|---|
+| `GET /api/ping` | 200 `{"app":"whatsmyagentdoing","admin":"loopback","demo":true}` | 200, same body |
+| `GET /` | 200 `text/html`, 84 365 bytes, `cache-control: no-store` | 200, identical size |
+| `GET /events` | 200 `text/event-stream`, first bytes `data: {"now":…,"lang":null,"sessions":[…]` | 200, same |
+| `GET /office3d.js` | 200 `text/javascript`, 722 273 bytes | 200, identical size |
+
+8/8 = 200. (`/events` is an open stream, so curl reports a read timeout after
+receiving the first frames; the status line is 200.) As in §2, the LAN-IP
+request is seen as loopback by the container.
+
+## R7. Admin routes with spoofed headers — PASS
+
+From `http://192.168.1.139:4546`, for `POST /api/update`, `POST /api/shutdown`
+and `POST /api/scenes/install` (each with its `x-whatsmyagentdoing` header),
+9 variants each: plain; `X-Forwarded-For: 127.0.0.1`; `Forwarded: for=127.0.0.1`;
+`X-Real-IP: 127.0.0.1`; `Host: localhost`; `Host: localhost:4546`;
+`Origin: http://localhost:4546`; `Origin: http://evil.example`; all spoofs
+combined plus a bogus `Authorization`/`X-WMAD-Token`. Plus `GET` on each path.
+
+- **27/27 POSTs → 403** `{"ok":false,"error":"admin disabled on LAN"}`.
+- **3/3 GETs → 404** (no such route).
+- Afterwards the container was still `running (healthy)`, `RestartCount=0`,
+  `/api/ping` 200 — nothing took effect.
+
+## R8. Docker security posture — PASS
+
+`docker inspect botroom-lan` after the whole run: `User=node`,
+`Privileged=false`, `ReadonlyRootfs=true`, `CapDrop=[ALL]`,
+`SecurityOpt=[no-new-privileges:true]`, **`Mounts=0`**, `Binds=[]`,
+`Devices=[]`, tmpfs only `/tmp` and `/home/node/.whatsmyagentdoing`,
+`PortBindings 4546→4546`, health `healthy`, `RestartCount=0`. No HOME, log, PID
+or docker-socket mounts. Port 4545 still held by the same local demo process.
+
+## R9. Horizontal overflow — PASS
+
+`documentElement.scrollWidth − clientWidth` with the panel closed and open, 2D
+and 3D: **0 at all 8 combinations** (1280×800, 360×800, 390×844, 844×390 × 2D/3D),
+and the document is never horizontally scrollable. Elements reported past the
+viewport edge are the off-canvas slide-in panels (closed side panel at x≥width,
+closed settings/today drawers at x<0) and a few `.srow` rows a few px past the
+panel edge inside the panel's `overflow:hidden`; none of them makes the page
+scroll sideways.
+
+## Still open
+
+1. **D2 in 3D** — the phone bottom sheet still covers the room in the 3D office
+   (R2). The 2D path is fixed.
+2. **2D phone label size** — ≈9 px instead of the documented ~11 px (R4); the
+   `labelScale` cap of 2.2 is too low for the phone zoom of 0.40–0.44.
+3. Carried over from the first report: a from-scratch `docker build` was not
+   re-run, and all LAN checks are host-side, not from a physical phone.
+
