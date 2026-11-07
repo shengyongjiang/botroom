@@ -7,3 +7,6 @@ packs/
 # Docker: local env and secrets
 .env
 secrets/
+
+# Local screenshots (outside-repo copies live in botroom-review-preview)
+.screenshots-tmp/
